@@ -1,0 +1,22 @@
+[package]
+name = "nelly"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.93"
+fluster = { path = "../fluster" }
+input-linux = "0.7.1"
+memmap2 = "0.9.5"
+rustix = "0.38.41"
+thiserror = "2.0.3"
+tracing = "0.1.40"
+tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
+
+[dependencies.smithay-client-toolkit]
+version = "0.19.2"
+default-features = false
+features = ["calloop"]
+
+[build-dependencies]
+fluster = { path = "../fluster" }
