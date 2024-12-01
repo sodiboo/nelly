@@ -306,22 +306,23 @@ impl fluster::CompositorHandler for NellyCompositor {
 
             surface.damage_buffer(x, y, width, height);
 
+            let src = allocation.cast_const();
+            let dst = pool.mmap().as_mut_ptr();
+
             for i in y..height {
-                let src = allocation;
                 let src = unsafe {
                     src.byte_offset((i * stride) as isize)
                         .byte_offset((x * self.format.bytes() as i32) as isize)
                 };
-                let dst = pool.mmap().as_mut_ptr();
                 let dst = unsafe {
-                    dst.offset((i * stride) as isize)
-                        .offset((x * self.format.bytes() as i32) as isize)
+                    dst.byte_offset((i * stride) as isize)
+                        .byte_offset((x * self.format.bytes() as i32) as isize)
                 };
 
                 if self.format == PixelFormat::Split {
                     // src is Rgba8888, dst is Argb8888
-                    let src = src as *const [u8; 4];
-                    let dst = dst as *mut [u8; 4];
+                    let src = src.cast::<[u8; 4]>();
+                    let dst = dst.cast::<[u8; 4]>();
                     for j in 0..width as isize {
                         let [r, g, b, a] = unsafe { std::ptr::read(src.offset(j)) };
                         unsafe { std::ptr::write(dst.offset(j), [a, r, g, b]) };
@@ -329,7 +330,7 @@ impl fluster::CompositorHandler for NellyCompositor {
                 } else {
                     unsafe {
                         std::ptr::copy_nonoverlapping(
-                            &raw const *src,
+                            src,
                             dst,
                             width as usize * self.format.bytes(),
                         );
