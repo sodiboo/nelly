@@ -1,0 +1,16 @@
+[package]
+name = "nelly-runner"
+version.workspace = true
+edition = "2024"
+
+[features]
+default = ["build-in-cargo"]
+build-in-cargo = []
+
+[dependencies]
+nelly.path = ".."
+anyhow.workspace = true
+fluster.workspace = true # required for linkage metadata
+
+[build-dependencies]
+fluster-build-support.workspace = true

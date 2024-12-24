@@ -11,10 +11,13 @@ use std::{
     fs::File,
     io,
     os::unix::prelude::{AsFd, OwnedFd},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
-use tracing::debug;
+use tracing::{debug, trace};
 
 use memmap2::MmapRaw;
 use smithay_client_toolkit::reexports::client::{
@@ -39,12 +42,6 @@ pub struct SinglePool {
 pub struct BufferBacking {
     pub mem_file: File,
     pub mmap: MmapRaw,
-}
-
-impl Drop for BufferBacking {
-    fn drop(&mut self) {
-        debug!("Dropping buffer backing");
-    }
 }
 
 delegate_noop!(Nelly: wl_shm_pool::WlShmPool); // no events
@@ -83,6 +80,8 @@ impl SinglePool {
         let size = stride * height;
         let shm_fd = SinglePool::create_shm_fd()?;
         let mem_file = File::from(shm_fd);
+        // must be positive always
+        #[allow(clippy::cast_sign_loss)]
         mem_file.set_len(size as u64)?;
 
         let pool = shm.create_pool(mem_file.as_fd(), size, qh, ());
@@ -135,13 +134,10 @@ impl SinglePool {
             let mode = Mode::RUSR | Mode::WUSR;
 
             match rustix::shm::shm_open(mem_file_handle.as_str(), flags, mode) {
-                Ok(fd) => match rustix::shm::shm_unlink(mem_file_handle.as_str()) {
-                    Ok(_) => return Ok(fd),
-
-                    Err(errno) => {
-                        return Err(errno.into());
-                    }
-                },
+                Ok(fd) => {
+                    rustix::shm::shm_unlink(mem_file_handle.as_str())?;
+                    return Ok(fd);
+                }
 
                 Err(Errno::EXIST) => {
                     // Change the handle if we happen to be duplicate.

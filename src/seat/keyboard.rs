@@ -23,6 +23,8 @@ impl KeyboardGlobalState {
     }
 
     pub fn get_keyboard(&self, seat: &WlSeat, qh: &QueueHandle<Nelly>) -> Keyboard {
+        _ = self;
+
         let wl_keyboard = seat.get_keyboard(qh, KeyboardData::new());
 
         Keyboard { wl_keyboard }

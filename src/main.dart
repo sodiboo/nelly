@@ -1,9 +1,103 @@
-import 'package:flutter/material.dart';
+import "dart:async";
+import "dart:ui";
 
-void main(List<String> args) {
-  print("HELLO WORLD FROM DART!! // ${args.join(", ")}");
+import "package:flutter/material.dart";
 
-  runApp(const MyApp());
+import "tracing.dart";
+import "wl_flutter/xdg_toplevel.dart";
+
+void main(List<String> argv) {
+  runZoned(() {
+    // runWidget(MultiViewApp(
+    //   viewBuilder: (ctx) =>
+    //       ((View.of(ctx) == PlatformDispatcher.instance.implicitView)
+    //           ? const MyApp()
+    //           : const Placeholder()),
+    // ));
+    runWidget(const Nelly());
+  }, zoneSpecification: const ZoneSpecification(print: zonePrintToEmbedder));
+}
+
+class Nelly extends StatelessWidget {
+  const Nelly({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return const ViewCollection(views: [
+      XdgToplevel(title: "nelly", appId: "nelly", child: MyApp()),
+    ]);
+  }
+}
+
+/// Calls [viewBuilder] for every view added to the app to obtain the widget to
+/// render into that view. The current view can be looked up with [View.of].
+class MultiViewApp extends StatefulWidget {
+  const MultiViewApp({super.key, required this.viewBuilder});
+
+  final WidgetBuilder viewBuilder;
+
+  @override
+  State<MultiViewApp> createState() => _MultiViewAppState();
+}
+
+class _MultiViewAppState extends State<MultiViewApp>
+    with WidgetsBindingObserver {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _updateViews();
+  }
+
+  @override
+  void didUpdateWidget(MultiViewApp oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Need to re-evaluate the viewBuilder callback for all views.
+    _views.clear();
+    _updateViews();
+  }
+
+  @override
+  void didChangeMetrics() {
+    _updateViews();
+  }
+
+  Map<Object, View> _views = {};
+
+  void _updateViews() {
+    final Map<Object, View> newViews = {};
+    for (final FlutterView view
+        in WidgetsBinding.instance.platformDispatcher.views) {
+      final View viewWidget = _views[view.viewId] ?? _createViewWidget(view);
+      newViews[view.viewId] = viewWidget;
+    }
+    setState(() {
+      _views = newViews;
+    });
+  }
+
+  View _createViewWidget(FlutterView view) {
+    return View(
+      view: view,
+      child: Builder(
+        builder: widget.viewBuilder,
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ViewCollection(
+        views: _views.values
+            // .where((v) => v.view != PlatformDispatcher.instance.implicitView)
+            .toList(growable: false));
+  }
 }
 
 class MyApp extends StatelessWidget {
@@ -13,7 +107,7 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Flutter Demo',
+      title: "Flutter Demo",
       theme: ThemeData(
         // This is the theme of your application.
         //
@@ -30,10 +124,11 @@ class MyApp extends StatelessWidget {
         //
         // This works for code too, not just values: Most code changes can be
         // tested with just a hot reload.
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
+        colorScheme: ColorScheme.fromSeed(seedColor: Colors.purple),
         useMaterial3: true,
       ),
-      home: const MyHomePage(title: 'Flutter Demo Home Page'),
+      home: MyHomePage(
+          title: "Flutter Demo Home Page (${View.of(context).viewId})"),
     );
   }
 }
@@ -108,10 +203,10 @@ class _MyHomePageState extends State<MyHomePage> {
           mainAxisAlignment: MainAxisAlignment.center,
           children: <Widget>[
             const Text(
-              'You have pushed the button this many times:',
+              "You have pushed the button this many times:",
             ),
             Text(
-              '$_counter',
+              "$_counter",
               style: Theme.of(context).textTheme.headlineMedium,
             ),
           ],
@@ -119,7 +214,7 @@ class _MyHomePageState extends State<MyHomePage> {
       ),
       floatingActionButton: FloatingActionButton(
         onPressed: _incrementCounter,
-        tooltip: 'Increment',
+        tooltip: "Increment",
         child: const Icon(Icons.add),
       ), // This trailing comma makes auto-formatting nicer for build methods.
     );

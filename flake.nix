@@ -1,6 +1,6 @@
 {
   inputs = {
-    nixpkgs.url = "github:sodiboo/nixpkgs/flutter";
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
 
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
@@ -40,19 +40,28 @@
           );
 
           flutter = pkgs.flutterPackages-source.stable;
-
         in
         {
           default = pkgs.mkShell {
-            buildInputs = [
+
+            nativeBuildInputs = [
               rust-nightly-toolchain
+              pkgs.rustPlatform.bindgenHook
               flutter
+              (pkgs.writeScriptBin "pub" ''
+                exec "${flutter}/bin/flutter" --local-engine=host_release --local-engine-host=host_release pub "$@"
+              '')
+              pkgs.cargo-expand
+              pkgs.rust-cbindgen
+              # flutter_rust_bridge_codegen
+            ];
+
+            buildInputs = [
               pkgs.libxkbcommon
             ];
 
-            LIBCLANG_PATH = lib.makeLibraryPath [
-              pkgs.libclang
-            ];
+            # needed for ffi to work
+            RUSTFLAGS = "-Z export-executable-symbols -C link-arg=-Wl,--export-dynamic";
 
             FLUTTER_ENGINE = "${flutter.engine}";
 

@@ -1,21 +1,18 @@
-mod gen {
-    include!(concat!(env!("OUT_DIR"), "/generated.rs"));
-}
 use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
+    marker::PhantomData,
     path::{Path, PathBuf},
     rc::Rc,
-    sync::Arc,
+    sync::{atomic::Ordering, Arc, Mutex},
 };
 
 use fluster::{
     AOTData, AOTDataSource, BackingStore, BackingStoreConfig, Engine, Layer, LayerContent,
     ProjectArgs, SoftwareBackingStore, SoftwarePixelFormat, SoftwareRendererConfig, ViewId,
+    WindowMetricsEvent,
 };
-use gen::{APP_LIBRARY, ASSETS};
 use smithay_client_toolkit::{
-    compositor::{Surface, SurfaceData, SurfaceDataExt},
     reexports::{
         calloop::{
             self,
@@ -24,24 +21,40 @@ use smithay_client_toolkit::{
         },
         client::{
             delegate_noop,
-            protocol::{wl_buffer, wl_shm, wl_shm_pool, wl_surface::WlSurface},
-            QueueHandle,
+            protocol::{
+                wl_buffer::{self, WlBuffer},
+                wl_shm, wl_shm_pool,
+                wl_surface::WlSurface,
+            },
+            Proxy, QueueHandle,
         },
-        protocols::xdg::shell::client::xdg_toplevel::XdgToplevel,
     },
-    shell::{xdg::window::Window, WaylandSurface},
+    session_lock::SessionLockSurface,
+    shell::wlr_layer::LayerSurface,
     shm::Shm,
 };
-use tracing::{debug, error, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 
-use crate::{config::Config, nelly::Nelly, pool::SinglePool};
+use crate::{
+    config::Config,
+    nelly::Nelly,
+    platform_message::PlatformMessage,
+    pool::SinglePool,
+    shell::{
+        compositor::{Surface, SurfaceData},
+        xdg::{popup::Popup, window::Window},
+        WaylandSurface,
+    },
+};
 
 enum EmbedderMessage {
+    Ping,
     Vsync(fluster::VsyncBaton),
+    PlatformMessage(PlatformMessage, fluster::PlatformMessageResponse),
 }
 
 pub struct Handler {
-    config: Rc<RefCell<Config>>,
+    config: Arc<Mutex<Config>>,
     msg: Sender<EmbedderMessage>,
 }
 
@@ -59,8 +72,19 @@ impl fluster::EngineHandler for Handler {
         message: &[u8],
         response: fluster::PlatformMessageResponse,
     ) {
-        println!("platform message: {:?}", message);
-        response.send(&[]).unwrap(); // send empty response to avoid memory leak
+        info!("received platform message: {channel:?}, {message:?}");
+        match PlatformMessage::decode(channel, message) {
+            Ok(message) => {
+                info!("decoded platform message: {message:?}");
+                self.msg
+                    .send(EmbedderMessage::PlatformMessage(message, response))
+                    .unwrap()
+            }
+            Err(e) => {
+                error!("{e:?}");
+                response.send(&[]).unwrap(); // send empty response, avoids memory leak
+            }
+        }
     }
 
     fn vsync(&mut self, baton: fluster::VsyncBaton) {
@@ -68,111 +92,99 @@ impl fluster::EngineHandler for Handler {
     }
 
     fn update_semantics(&mut self, update: fluster::SemanticsUpdate) {
-        println!("update semantics");
+        debug!("update semantics");
     }
 
     fn log_message(&mut self, tag: &std::ffi::CStr, message: &std::ffi::CStr) {
-        println!("log message: [{tag:?}] {}", message.to_str().unwrap());
+        let tag = tag.to_string_lossy();
+        let message = message.to_string_lossy();
+        log::info!(target: &tag, "{message}");
     }
 
     fn on_pre_engine_restart(&mut self) {
-        println!("pre engine restart");
+        debug!("pre engine restart");
     }
 
     fn channel_update(&mut self, channel: &std::ffi::CStr, listening: bool) {
-        println!("channel update: {channel:?}, {listening}");
+        debug!("channel update: {channel:?}, {listening}");
     }
 
     fn root_isolate_created(&mut self) {
-        println!("root isolate created");
+        // crate::ffi::init_resolver();
+        debug!("root isolate created");
     }
 }
 
-macro_rules! pixfmt {
-    (
-        $(
-            $variant:ident => wl_shm::$wl_shm:ident, flutter::$flutter:ident;
-        )*
-    ) => {
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-        enum PixelFormat {
-            $($variant,)*
-        }
+/// The singular pixel format used by the software renderer.
+struct PixelFormat;
 
-        impl From<PixelFormat> for wl_shm::Format {
-            fn from(value: PixelFormat) -> Self {
-                match value {
-                    $(PixelFormat::$variant => wl_shm::Format::$wl_shm,)*
-                }
-            }
-        }
-
-        impl From<PixelFormat> for fluster::SoftwarePixelFormat {
-            fn from(value: PixelFormat) -> Self {
-                match value {
-                    $(PixelFormat::$variant => fluster::SoftwarePixelFormat::$flutter,)*
-                }
-            }
-        }
-
-        impl TryFrom<wl_shm::Format> for PixelFormat {
-            type Error = wl_shm::Format;
-
-            fn try_from(value: wl_shm::Format) -> Result<Self, Self::Error> {
-                match value {
-                    $(wl_shm::Format::$wl_shm => Ok(PixelFormat::$variant),)*
-                    v => Err(v),
-                }
-            }
-        }
-
-    };
+impl From<PixelFormat> for wl_shm::Format {
+    fn from(PixelFormat: PixelFormat) -> Self {
+        wl_shm::Format::Argb8888 // u32 (little-endian)
+    }
 }
 
-pixfmt! {
-    Rgba8888 => wl_shm::Rgba8888, flutter::RGBA8888;
-    Bgra8888 => wl_shm::Bgra8888, flutter::BGRA8888;
-    Rgba4444 => wl_shm::Rgba4444, flutter::RGBA4444;
-    Rgbx8888 => wl_shm::Rgbx8888, flutter::RGBX8888;
-    Rgb565 => wl_shm::Rgb565, flutter::RGB565;
-
-    Split => wl_shm::Argb8888, flutter::RGBA8888;
+impl From<PixelFormat> for fluster::SoftwarePixelFormat {
+    fn from(PixelFormat: PixelFormat) -> Self {
+        fluster::SoftwarePixelFormat::BGRA8888 // [u8; 4]
+    }
 }
 
 impl PixelFormat {
-    fn bytes(self) -> usize {
-        match self {
-            PixelFormat::Rgb565 => 2,
-            PixelFormat::Rgba4444 => 2,
-            PixelFormat::Rgba8888 => 4,
-            PixelFormat::Rgbx8888 => 4,
-            PixelFormat::Bgra8888 => 4,
-
-            PixelFormat::Split => 4, // sizeof(Argb8888) == sizeof(Rgba8888)
-        }
+    #[allow(clippy::unused_self)]
+    const fn bytes(self) -> usize {
+        4
     }
 }
 
+#[derive(Copy, Clone, Hash, PartialEq, Eq)]
+struct BackingStoreAllocation(*mut u8);
+
+unsafe impl Send for BackingStoreAllocation {}
+unsafe impl Sync for BackingStoreAllocation {}
+
 struct NellyCompositor {
-    config: Rc<RefCell<Config>>,
+    config: Arc<Mutex<Config>>,
     msg: Sender<EmbedderMessage>,
 
     qh: QueueHandle<Nelly>,
     wl_shm: wl_shm::WlShm,
 
-    views: HashMap<ViewId, FlutterWaylandSurface>,
+    buffers: HashMap<BackingStoreAllocation, WlBuffer>,
 
-    format: PixelFormat,
+    views: Arc<Mutex<HashMap<ViewId, FlutterWaylandSurface>>>,
+}
+
+impl NellyCompositor {
+    /// Embedder callbacks are invoked on the Flutter Engine's own threads.
+    /// As such, they don't run in the event loop, and any requests they make
+    /// on Wayland objects may not be flushed immediately. This is because those
+    /// requests are queued up, and the event loop flushes them at the end of the
+    /// event loop iteration, and not after each event.
+    ///
+    /// This means that if the event queue is just waiting, it will block indefinitely
+    /// until an event occurs. And if no events occur, it will think that nothing is happening.
+    /// And if nothing is happening, it will not flush the queue.
+    ///
+    /// To mitigate this, we send a ping message to the event loop to wake it up.
+    /// This is a no-op, but it will cause the event loop to complete an iteration and flush the queue.
+    fn ping_queue(&self) {
+        self.msg.send(EmbedderMessage::Ping).unwrap();
+    }
 }
 
 pub enum FlutterWaylandSurface {
     XdgToplevel(Window),
+    XdgPopup(Popup),
+    // SessionLock(SessionLockSurface),
+    // Layer(LayerSurface),
 }
 
-impl FlutterWaylandSurface {
-    fn surface(&self) -> &WlSurface {
+impl WaylandSurface for FlutterWaylandSurface {
+    fn surface(&self) -> &Surface {
         match self {
-            FlutterWaylandSurface::XdgToplevel(toplevel) => toplevel.wl_surface(),
+            FlutterWaylandSurface::XdgToplevel(toplevel) => toplevel.surface(),
+            FlutterWaylandSurface::XdgPopup(popup) => popup.surface(),
         }
     }
 }
@@ -183,45 +195,90 @@ impl From<Window> for FlutterWaylandSurface {
     }
 }
 
+impl From<Popup> for FlutterWaylandSurface {
+    fn from(popup: Popup) -> Self {
+        FlutterWaylandSurface::XdgPopup(popup)
+    }
+}
+
+// impl From<SessionLockSurface> for FlutterWaylandSurface {
+//     fn from(lock: SessionLockSurface) -> Self {
+//         FlutterWaylandSurface::SessionLock(lock)
+//     }
+// }
+
+// impl From<LayerSurface> for FlutterWaylandSurface {
+//     fn from(layer: LayerSurface) -> Self {
+//         FlutterWaylandSurface::Layer(layer)
+//     }
+// }
+
 impl fluster::CompositorHandler for NellyCompositor {
     fn create_backing_store(&mut self, config: BackingStoreConfig) -> Option<BackingStore> {
-        let width = config.size.width as usize;
-        let height = config.size.height as usize;
-        debug!(
-            "backing store: {} -> {}",
-            format_args!("{}x{}", config.size.width, config.size.height),
-            format_args!("{width}x{height}")
-        );
+        if config.size.width.fract() != 0.0 || config.size.height.fract() != 0.0 {
+            error!(
+                "backing store size is not pixel aligned: {:?}",
+                config.size.height
+            );
+            return None;
+        }
 
-        let row_bytes = width * self.format.bytes();
+        if config.size.width.is_sign_negative() || config.size.height.is_sign_negative() {
+            error!("backing store size is negative: {:?}", config.size.height);
+            return None;
+        }
 
-        let layout = std::alloc::Layout::from_size_align(row_bytes * height, 1)
-            .inspect_err(|e| {
-                error!("Failed to allocate backing store: {:?}", e);
-            })
-            .ok()?;
+        #[expect(clippy::cast_possible_truncation, reason = "checked")]
+        let width = config.size.width as i32;
+        #[expect(clippy::cast_possible_truncation, reason = "checked")]
+        let height = config.size.height as i32;
 
-        let allocation = unsafe { std::alloc::alloc(layout) };
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_possible_wrap,
+            reason = "Wayland requires i32. can't do anything about it. also, it's checked"
+        )]
+        let stride = width * PixelFormat.bytes() as i32;
 
+        let pool = SinglePool::new(
+            width,
+            height,
+            stride,
+            PixelFormat.into(),
+            &self.qh,
+            &self.wl_shm,
+        )
+        .inspect_err(|e| {
+            error!("failed to create a pool: {:?}", e);
+        })
+        .ok()?;
+
+        let allocation = pool.mmap().as_mut_ptr();
+
+        self.buffers
+            .insert(BackingStoreAllocation(allocation), pool.buffer().clone());
+
+        self.ping_queue();
+
+        #[allow(clippy::cast_sign_loss, reason = "checked")]
         Some(BackingStore::Software(SoftwareBackingStore {
             allocation,
-            row_bytes,
-            height,
-            pixel_format: self.format.into(),
+            row_bytes: stride as usize,
+            height: height as usize,
+            pixel_format: PixelFormat.into(),
         }))
     }
 
     fn collect_backing_store(&mut self, backing_store: BackingStore) -> bool {
+        #[expect(
+            clippy::single_match_else,
+            reason = "will add more backings stores later"
+        )]
         match backing_store {
-            BackingStore::Software(SoftwareBackingStore {
-                allocation,
-                row_bytes,
-                height,
-                pixel_format: _,
-            }) => {
-                let layout = std::alloc::Layout::from_size_align(row_bytes * height, 1).unwrap();
-
-                unsafe { std::alloc::dealloc(allocation, layout) };
+            BackingStore::Software(SoftwareBackingStore { allocation, .. }) => {
+                // drop glue is in an Arc that the WlBuffer still holds a strong reference to
+                self.buffers.remove(&BackingStoreAllocation(allocation));
+                self.ping_queue();
                 true
             }
             _ => {
@@ -232,13 +289,13 @@ impl fluster::CompositorHandler for NellyCompositor {
     }
 
     fn present_view(&mut self, view_id: ViewId, layers: &[fluster::Layer]) -> bool {
-        let Some(view) = self.views.get(&view_id) else {
+        let views = self.views.lock().unwrap();
+        let Some(view) = views.get(&view_id) else {
             error!("flutter gave me a view id i don't know about");
             return false;
         };
 
-        let FlutterWaylandSurface::XdgToplevel(window) = view;
-        let surface = window.wl_surface();
+        view.request_throttled_frame_callback(&self.qh);
 
         let [layer] = layers else {
             error!(
@@ -253,45 +310,22 @@ impl fluster::CompositorHandler for NellyCompositor {
             return false;
         };
 
-        let &BackingStore::Software(SoftwareBackingStore {
-            allocation,
-            row_bytes,
-            height,
-            pixel_format,
-        }) = backing_store
-        else {
+        let &BackingStore::Software(SoftwareBackingStore { allocation, .. }) = backing_store else {
             error!("flutter gave me a backing store i can't handle (i only ever submitted software backing stores)");
             return false;
         };
 
-        if pixel_format != self.format.into() {
-            error!("flutter gave me a backing store with a pixel format i didn't expect");
+        let Some(buffer) = self.buffers.get(&BackingStoreAllocation(allocation)) else {
+            error!("flutter gave me a software backing store i didn't submit");
             return false;
-        }
-
-        let width = (row_bytes / self.format.bytes()) as i32;
-        let height = height as i32;
-        let stride = row_bytes as i32;
-
-        let pool = match SinglePool::new(
-            width,
-            height,
-            stride,
-            self.format.into(),
-            &self.qh,
-            &self.wl_shm,
-        ) {
-            Ok(pool) => pool,
-            Err(e) => {
-                error!("failed to create a pool: {:?}", e);
-                return false;
-            }
         };
 
-        surface.attach(Some(pool.buffer()), 0, 0);
+        view.attach(Some(buffer), 0, 0);
 
-        for rect in present_info.paint_region.regions.iter() {
-            debug!("painting rect: {:?}", rect);
+        for rect in &present_info.paint_region.regions {
+            if rect.top != 0.0 || rect.left != 0.0 {
+                error!("paint region {rect:?} is not at 0,0"); // TODO: is `right` and `bottom` meant to be `x+width` and `y+height`?
+            }
             let (x, y) = (rect.left, rect.top);
             let (width, height) = (rect.right, rect.bottom);
 
@@ -301,117 +335,41 @@ impl fluster::CompositorHandler for NellyCompositor {
                 return false;
             }
 
-            let (x, y) = (x as i32, y as i32);
-            let (width, height) = (width as i32, height as i32);
-
-            surface.damage_buffer(x, y, width, height);
-
-            let src = allocation.cast_const();
-            let dst = pool.mmap().as_mut_ptr();
-
-            for i in y..height {
-                let src = unsafe {
-                    src.byte_offset((i * stride) as isize)
-                        .byte_offset((x * self.format.bytes() as i32) as isize)
-                };
-                let dst = unsafe {
-                    dst.byte_offset((i * stride) as isize)
-                        .byte_offset((x * self.format.bytes() as i32) as isize)
-                };
-
-                if self.format == PixelFormat::Split {
-                    // src is Rgba8888, dst is Argb8888
-                    let src = src.cast::<[u8; 4]>();
-                    let dst = dst.cast::<[u8; 4]>();
-                    for j in 0..width as isize {
-                        let [r, g, b, a] = unsafe { std::ptr::read(src.offset(j)) };
-                        unsafe { std::ptr::write(dst.offset(j), [a, r, g, b]) };
-                    }
-                } else {
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(
-                            src,
-                            dst,
-                            width as usize * self.format.bytes(),
-                        );
-                    }
-                }
-            }
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "Wayland requires i32. can't do anything about it."
+            )]
+            view.damage_buffer(x as i32, y as i32, width as i32, height as i32);
         }
-        surface.commit();
 
-        debug!("presented view {view_id:?}");
+        view.viewport()
+            .set_source(0.0, 0.0, layer.size.width, layer.size.height);
+
+        #[expect(clippy::cast_possible_truncation)] // TODO: is this correct?
+        view.viewport().set_destination(
+            (layer.size.width / view.scale_factor()).round() as i32,
+            (layer.size.height / view.scale_factor()).round() as i32,
+        );
+
+        view.commit();
+
+        self.ping_queue();
 
         true
     }
 }
 
 pub fn init(
-    config: Rc<RefCell<Config>>,
-    loop_handle: LoopHandle<Nelly>,
+    assets_path: &Path,
+    app_library: Option<&Path>,
+    config: &Arc<Mutex<Config>>,
+    loop_handle: &LoopHandle<'static, Nelly>,
     shm: &Shm,
-    qh: QueueHandle<Nelly>,
-    implicit_surface: FlutterWaylandSurface,
+    qh: &QueueHandle<Nelly>,
+    views: Arc<Mutex<HashMap<ViewId, FlutterWaylandSurface>>>,
 ) -> anyhow::Result<Engine> {
-    debug!("{:?}", shm.formats());
-    let supported_formats: HashSet<PixelFormat> = shm
-        .formats()
-        .iter()
-        .copied()
-        .map(PixelFormat::try_from)
-        .filter_map(Result::ok)
-        .collect();
-
-    debug!("Supported formats: {:?}", supported_formats);
-
-    let format = [
-        PixelFormat::Rgba8888,
-        PixelFormat::Bgra8888,
-        PixelFormat::Rgba4444,
-        PixelFormat::Rgbx8888,
-        PixelFormat::Rgb565,
-        PixelFormat::Split,
-    ]
-    .iter()
-    .find(|format| supported_formats.contains(format))
-    .copied();
-
-    let Some(format) = format else {
-        anyhow::bail!("The wayland compositor doesn't support the required Argb8888 wl_shm format. \
-            I'd much rather it support Rgba8888 or Bgra8888, since those can work directly with the Flutter engine. \
-            But as a fallback, i can also convert to Argb8888, which is required by the core Wayland protocol.");
-    };
-    trace!("Using {:?} as the pixel format.", format);
-    match format {
-        PixelFormat::Rgba8888 | PixelFormat::Bgra8888 => {
-            // These formats are optimal for the Flutter engine.
-        }
-        PixelFormat::Rgba4444 => {
-            warn!("Compositor doesn't support Rgba8888 or Bgra8888, which are optimal for the Flutter engine. \
-                Falling back to Rgba4444, which has lower bit depth. \
-                Colors will be less accurate.");
-        }
-        PixelFormat::Rgbx8888 => {
-            warn!("Compositor doesn't support Rgba8888 or Bgra8888, which are optimal for the Flutter engine. \
-                Falling back to Rgbx8888, which doesn't support transparency. \
-                All surfaces will be opaque.");
-        }
-        PixelFormat::Rgb565 => {
-            warn!("Compositor doesn't support Rgba8888 or Bgra8888, which are optimal for the Flutter engine. \
-                Falling back to Rgb565, which has lower bit depth and doesn't support transparency. \
-                Colors will be less accurate and all surfaces will be opaque.");
-        }
-
-        PixelFormat::Split => {
-            warn!("Compositor doesn't support any pixel format that Flutter supports. \
-                Falling back to a rendering as Rgba8888 and submitting Argb8888. \
-                This will require a conversion step, which may be slower, especially on high resolution displays. \
-                Consider implementing Rgba8888 or Bgra8888 support in the compositor.");
-        }
-    }
-
-    let aot_data = APP_LIBRARY
-        .map(PathBuf::from)
+    let aot_data = app_library
+        .map(Path::to_path_buf)
         .map(AOTDataSource::ElfPath)
         .as_ref()
         .map(AOTData::new)
@@ -433,12 +391,13 @@ pub fn init(
     let (send, chan) = channel();
 
     loop_handle
-        .insert_source(chan, |msg, _, nelly| {
+        .insert_source(chan, |msg, (), nelly| {
             match msg {
                 calloop::channel::Event::Msg(msg) => {
                     match msg {
+                        EmbedderMessage::Ping => {}
                         EmbedderMessage::Vsync(vsync_baton) => {
-                            debug!("vsync: {:?}", vsync_baton);
+                            // debug!("vsync: {:?}", vsync_baton);
                             nelly
                                 .engine()
                                 .on_vsync(
@@ -447,6 +406,17 @@ pub fn init(
                                     Engine::get_current_time(),
                                 )
                                 .unwrap();
+                        }
+                        EmbedderMessage::PlatformMessage(msg, response) => {
+                            match msg.run(nelly) {
+                                Ok(response_data) => {
+                                    response.send(&response_data).unwrap();
+                                }
+                                Err(e) => {
+                                    error!("failed to run platform message: {e:?}");
+                                    response.send(&[]).unwrap(); // send empty response, avoids memory leak
+                                }
+                            }
                         }
                     };
                 }
@@ -465,8 +435,10 @@ pub fn init(
             }),
         },
         ProjectArgs {
-            assets_path: Path::new(ASSETS),
-            icu_data_path: Path::new(fluster::build::ICU_DATA),
+            assets_path,
+            aot_data,
+            icu_data_path: Path::new(crate::engine_meta::ICUDTL_DAT),
+
             command_line_argv: &[],
             persistent_cache_path: None,
             is_persistent_cache_read_only: true,
@@ -478,17 +450,15 @@ pub fn init(
                 handler: Box::new(NellyCompositor {
                     config: config.clone(),
                     msg: send.clone(),
-                    qh,
+                    qh: qh.clone(),
                     wl_shm: shm.wl_shm().clone(),
-                    // buffers: HashMap::new(),
-                    views: HashMap::from([(ViewId::IMPLICIT, implicit_surface)]),
-                    format,
+                    buffers: HashMap::new(),
+                    views,
                 }),
             }),
-            dart_entrypoint_argv: &["hello", "world", "from", "Rust"],
-            log_tag: c"nelly".into(),
+            dart_entrypoint_argv: &[],
+            log_tag: c"flutter".into(),
             dart_old_gen_heap_size: 0,
-            aot_data,
             handler: Box::new(Handler {
                 config: config.clone(),
                 msg: send.clone(),
@@ -496,6 +466,8 @@ pub fn init(
             compute_platform_resolved_locale: None,
         },
     )?;
+
+    debug!("engine initialized");
 
     Ok(engine)
 }

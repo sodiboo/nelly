@@ -72,7 +72,7 @@ impl Dispatch<ZwpPointerGesturesV1, ()> for Nelly {
         _: &mut Self,
         _: &ZwpPointerGesturesV1,
         _: <ZwpPointerGesturesV1 as Proxy>::Event,
-        _: &(),
+        (): &(),
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
@@ -93,8 +93,8 @@ impl GestureState {
         GestureState {
             device: DeviceData::new(),
             pointer: pointer.clone(),
-            cumulative_pos: Default::default(),
-            cumulative_rot: Default::default(),
+            cumulative_pos: Mutex::default(),
+            cumulative_rot: Mutex::default(),
         }
     }
 
@@ -129,9 +129,9 @@ impl Dispatch<ZwpPointerGestureSwipeV1, Arc<GestureState>> for Nelly {
                 (*cx, *cy) = (0.0, 0.0);
 
                 state.events.push(PointerEvent {
-                    view_id: data.device.nelly_surface().view_id(),
+                    view_id: data.device.surface_data().view_id(),
                     device: data.device.id,
-                    timestamp: Duration::from_millis(time as u64),
+                    timestamp: Duration::from_millis(u64::from(time)),
 
                     phase: PointerPhase::PanZoomStart,
                     x: state.x,
@@ -148,16 +148,16 @@ impl Dispatch<ZwpPointerGestureSwipeV1, Arc<GestureState>> for Nelly {
                     pan_y: *cy,
                     scale: 1.0,
                     rotation: 0.0,
-                })
+                });
             }
             zwp_pointer_gesture_swipe_v1::Event::Update { time, dx, dy } => {
-                *cx += dx;
-                *cy += dy;
+                *cx += dx * data.device.surface_data().scale_factor();
+                *cy += dy * data.device.surface_data().scale_factor();
 
                 state.events.push(PointerEvent {
-                    view_id: data.device.nelly_surface().view_id(),
+                    view_id: data.device.surface_data().view_id(),
                     device: data.device.id,
-                    timestamp: Duration::from_millis(time as u64),
+                    timestamp: Duration::from_millis(u64::from(time)),
 
                     phase: PointerPhase::PanZoomUpdate,
                     x: state.x,
@@ -174,7 +174,7 @@ impl Dispatch<ZwpPointerGestureSwipeV1, Arc<GestureState>> for Nelly {
                     pan_y: *cy,
                     scale: 1.0,
                     rotation: 0.0,
-                })
+                });
             }
             zwp_pointer_gesture_swipe_v1::Event::End {
                 serial: _,
@@ -184,9 +184,9 @@ impl Dispatch<ZwpPointerGestureSwipeV1, Arc<GestureState>> for Nelly {
                 data.device.leave(&data.device.surface());
 
                 state.events.push(PointerEvent {
-                    view_id: data.device.nelly_surface().view_id(),
+                    view_id: data.device.surface_data().view_id(),
                     device: data.device.id,
-                    timestamp: Duration::from_millis(time as u64),
+                    timestamp: Duration::from_millis(u64::from(time)),
 
                     phase: if cancelled != 0 {
                         PointerPhase::Cancel
@@ -207,7 +207,7 @@ impl Dispatch<ZwpPointerGestureSwipeV1, Arc<GestureState>> for Nelly {
                     pan_y: *cy,
                     scale: 1.0,
                     rotation: 0.0,
-                })
+                });
             }
             _ => unreachable!(),
         }
@@ -243,9 +243,9 @@ impl Dispatch<ZwpPointerGesturePinchV1, Arc<GestureState>> for Nelly {
                 *cr = 0.0;
 
                 state.events.push(PointerEvent {
-                    view_id: data.device.nelly_surface().view_id(),
+                    view_id: data.device.surface_data().view_id(),
                     device: data.device.id,
-                    timestamp: Duration::from_millis(time as u64),
+                    timestamp: Duration::from_millis(u64::from(time)),
 
                     phase: PointerPhase::PanZoomStart,
                     x: state.x,
@@ -261,8 +261,8 @@ impl Dispatch<ZwpPointerGesturePinchV1, Arc<GestureState>> for Nelly {
                     pan_x: *cx,
                     pan_y: *cy,
                     scale: 1.0,
-                    rotation: *cr,
-                })
+                    rotation: cr.to_radians(),
+                });
             }
             zwp_pointer_gesture_pinch_v1::Event::Update {
                 time,
@@ -271,14 +271,14 @@ impl Dispatch<ZwpPointerGesturePinchV1, Arc<GestureState>> for Nelly {
                 scale,
                 rotation,
             } => {
-                *cx += dx;
-                *cy += dy;
+                *cx += dx * data.device.surface_data().scale_factor();
+                *cy += dy * data.device.surface_data().scale_factor();
                 *cr += rotation; // this is also a delta in Wayland
 
                 state.events.push(PointerEvent {
-                    view_id: data.device.nelly_surface().view_id(),
+                    view_id: data.device.surface_data().view_id(),
                     device: data.device.id,
-                    timestamp: Duration::from_millis(time as u64),
+                    timestamp: Duration::from_millis(u64::from(time)),
 
                     phase: PointerPhase::PanZoomUpdate,
                     x: state.x,
@@ -295,7 +295,7 @@ impl Dispatch<ZwpPointerGesturePinchV1, Arc<GestureState>> for Nelly {
                     pan_y: *cy,
                     scale,
                     rotation: cr.to_radians(),
-                })
+                });
             }
             zwp_pointer_gesture_pinch_v1::Event::End {
                 serial: _,
@@ -305,9 +305,9 @@ impl Dispatch<ZwpPointerGesturePinchV1, Arc<GestureState>> for Nelly {
                 data.device.leave(&data.device.surface());
 
                 state.events.push(PointerEvent {
-                    view_id: data.device.nelly_surface().view_id(),
+                    view_id: data.device.surface_data().view_id(),
                     device: data.device.id,
-                    timestamp: Duration::from_millis(time as u64),
+                    timestamp: Duration::from_millis(u64::from(time)),
 
                     phase: if cancelled != 0 {
                         PointerPhase::Cancel
@@ -328,7 +328,7 @@ impl Dispatch<ZwpPointerGesturePinchV1, Arc<GestureState>> for Nelly {
                     pan_y: *cy,
                     scale: 1.0,
                     rotation: cr.to_radians(),
-                })
+                });
             }
             _ => unreachable!(),
         }

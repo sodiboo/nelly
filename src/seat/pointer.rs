@@ -117,9 +117,9 @@ impl PointerData {
 
         if axis_frame != AxisFrame::default() {
             let event = PointerEvent {
-                view_id: self.device.nelly_surface().view_id(),
+                view_id: self.device.surface_data().view_id(),
                 device: self.device.id,
-                timestamp: Duration::from_millis(axis_frame.time as u64),
+                timestamp: Duration::from_millis(u64::from(axis_frame.time)),
 
                 phase: if state.buttons.is_empty() {
                     PointerPhase::Hover
@@ -136,8 +136,8 @@ impl PointerData {
                 buttons: state.buttons,
 
                 signal_kind: PointerSignalKind::Scroll,
-                scroll_delta_x: axis_frame.horizontal.v120 as f64 / 120.0,
-                scroll_delta_y: axis_frame.vertical.v120 as f64 / 120.0,
+                scroll_delta_x: f64::from(axis_frame.horizontal.v120) / 120.0,
+                scroll_delta_y: f64::from(axis_frame.vertical.v120) / 120.0,
 
                 pan_x: 0.0,
                 pan_y: 0.0,
@@ -170,10 +170,13 @@ impl Dispatch<WlPointer, PointerData> for Nelly {
                 data.device.enter(&surface);
 
                 let mut state = data.state.lock().unwrap();
-                (state.x, state.y) = (surface_x, surface_y);
+                (state.x, state.y) = (
+                    surface_x * data.device.surface_data().scale_factor(),
+                    surface_y * data.device.surface_data().scale_factor(),
+                );
 
                 let event = PointerEvent {
-                    view_id: data.device.nelly_surface().view_id(),
+                    view_id: data.device.surface_data().view_id(),
                     device: data.device.id,
                     timestamp: Engine::get_current_time(),
 
@@ -196,6 +199,7 @@ impl Dispatch<WlPointer, PointerData> for Nelly {
                 state.events.push(event);
             }
             wl_pointer::Event::Leave { serial: _, surface } => {
+                let nelly_surface = data.device.surface_data();
                 data.device.leave(&surface);
 
                 let mut state = data.state.lock().unwrap();
@@ -203,7 +207,7 @@ impl Dispatch<WlPointer, PointerData> for Nelly {
                 (state.buttons) = PointerButtons::default();
 
                 let event = PointerEvent {
-                    view_id: data.device.nelly_surface().view_id(),
+                    view_id: nelly_surface.view_id(),
                     device: data.device.id,
                     timestamp: Engine::get_current_time(),
 
@@ -231,12 +235,15 @@ impl Dispatch<WlPointer, PointerData> for Nelly {
                 surface_y,
             } => {
                 let mut state = data.state.lock().unwrap();
-                (state.x, state.y) = (surface_x, surface_y);
+                (state.x, state.y) = (
+                    surface_x * data.device.surface_data().scale_factor(),
+                    surface_y * data.device.surface_data().scale_factor(),
+                );
 
                 let event = PointerEvent {
-                    view_id: data.device.nelly_surface().view_id(),
+                    view_id: data.device.surface_data().view_id(),
                     device: data.device.id,
-                    timestamp: Duration::from_millis(time as u64),
+                    timestamp: Duration::from_millis(u64::from(time)),
 
                     phase: if state.buttons.is_empty() {
                         PointerPhase::Hover
@@ -266,14 +273,15 @@ impl Dispatch<WlPointer, PointerData> for Nelly {
                 button,
                 state,
             } => {
+                use input_linux::Key;
+
                 let button_state = match state.into_result().unwrap() {
                     wl_pointer::ButtonState::Pressed => ButtonState::Pressed,
                     wl_pointer::ButtonState::Released => ButtonState::Released,
                     _ => unreachable!(),
                 };
 
-                use input_linux::Key;
-
+                #[allow(clippy::cast_possible_truncation)] // >u16 is disallowed by protocol for now
                 let key = Key::from_code(button as u16)
                     .expect("Button codes should be within the range of kernel KEY_COUNT");
 
@@ -299,15 +307,15 @@ impl Dispatch<WlPointer, PointerData> for Nelly {
                 let is_empty = state.buttons.is_empty();
 
                 let event = PointerEvent {
-                    view_id: data.device.nelly_surface().view_id(),
+                    view_id: data.device.surface_data().view_id(),
                     device: data.device.id,
-                    timestamp: Duration::from_millis(time as u64),
+                    timestamp: Duration::from_millis(u64::from(time)),
 
-                    phase: match button_state {
-                        ButtonState::Pressed if was_empty => PointerPhase::Down,
-                        ButtonState::Pressed => PointerPhase::Move,
-                        ButtonState::Released if is_empty => PointerPhase::Up,
-                        ButtonState::Released => PointerPhase::Move,
+                    phase: match (was_empty, is_empty) {
+                        (false, false) => PointerPhase::Move,
+                        (false, true) => PointerPhase::Up,
+                        (true, false) => PointerPhase::Down,
+                        (true, true) => PointerPhase::Hover, // (unreachable))
                     },
                     x: state.x,
                     y: state.y,
@@ -336,7 +344,7 @@ impl Dispatch<WlPointer, PointerData> for Nelly {
                 data.with_axis_frame_mut(|axis_frame| {
                     axis_frame.time(time);
                     axis_frame[axis].absolute += value;
-                })
+                });
             }
             wl_pointer::Event::Frame => {
                 let events = data.frame();
@@ -351,7 +359,7 @@ impl Dispatch<WlPointer, PointerData> for Nelly {
                     _ => unreachable!(),
                 };
 
-                data.with_axis_frame_mut(|axis_frame| axis_frame.source = source)
+                data.with_axis_frame_mut(|axis_frame| axis_frame.source = source);
             }
             wl_pointer::Event::AxisStop { time, axis } => {
                 let axis = match axis.into_result().unwrap() {
@@ -372,7 +380,7 @@ impl Dispatch<WlPointer, PointerData> for Nelly {
                     _ => unreachable!(),
                 };
 
-                data.with_axis_frame_mut(|axis_frame| axis_frame[axis].v120 += discrete * 120)
+                data.with_axis_frame_mut(|axis_frame| axis_frame[axis].v120 += discrete * 120);
             }
             wl_pointer::Event::AxisValue120 { axis, value120 } => {
                 let axis = match axis.into_result().unwrap() {
@@ -381,7 +389,7 @@ impl Dispatch<WlPointer, PointerData> for Nelly {
                     _ => unreachable!(),
                 };
 
-                data.with_axis_frame_mut(|axis_frame| axis_frame[axis].v120 += value120)
+                data.with_axis_frame_mut(|axis_frame| axis_frame[axis].v120 += value120);
             }
             wl_pointer::Event::AxisRelativeDirection { axis, direction } => {
                 let axis = match axis.into_result().unwrap() {
@@ -398,8 +406,8 @@ impl Dispatch<WlPointer, PointerData> for Nelly {
                 };
 
                 data.with_axis_frame_mut(|axis_frame| {
-                    axis_frame[axis].relative_direction = direction
-                })
+                    axis_frame[axis].relative_direction = direction;
+                });
             }
             _ => unreachable!(),
         }

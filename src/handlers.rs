@@ -1,21 +1,22 @@
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use smithay_client_toolkit::compositor::CompositorHandler;
 use smithay_client_toolkit::output::{OutputHandler, OutputState};
 use smithay_client_toolkit::reexports::client::protocol::wl_output::{Transform, WlOutput};
 use smithay_client_toolkit::reexports::client::protocol::wl_surface::WlSurface;
-use smithay_client_toolkit::reexports::client::protocol::{wl_buffer, wl_shm_pool};
-use smithay_client_toolkit::reexports::client::{delegate_noop, Connection, Dispatch, QueueHandle};
+use smithay_client_toolkit::reexports::client::{Connection, QueueHandle};
 use smithay_client_toolkit::registry::{ProvidesRegistryState, RegistryState};
 use smithay_client_toolkit::registry_handlers;
-use smithay_client_toolkit::shell::xdg::window::WindowHandler;
-use smithay_client_toolkit::shell::WaylandSurface;
 use smithay_client_toolkit::shm::ShmHandler;
 use tracing::debug;
 
-use crate::pool::BufferBacking;
+use crate::pool::{BufferBacking, SinglePool};
+use crate::shell::compositor::{CompositorHandler, CompositorState, SurfaceData};
+use crate::shell::xdg::window::{Window, WindowConfigure, WindowHandler};
+use crate::shell::WaylandSurface;
+use crate::{delegate_compositor, delegate_xdg_shell, delegate_xdg_window};
 
-use super::{Nelly, NellySurfaceData, WaylandBackendEvent};
+use super::{Nelly, NellyEvent};
 
 impl ProvidesRegistryState for Nelly {
     fn registry(&mut self) -> &mut RegistryState {
@@ -44,75 +45,72 @@ impl OutputHandler for Nelly {
 smithay_client_toolkit::delegate_output!(Nelly);
 
 impl CompositorHandler for Nelly {
+    fn compositor_state(&self) -> &CompositorState {
+        &self.compositor_state
+    }
+
     fn scale_factor_changed(
         &mut self,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-        _: &WlSurface,
-        _: i32,
+        conn: &Connection,
+        qh: &QueueHandle<Self>,
+        surface: &SurfaceData,
+        new_factor: f64,
     ) {
+        let view_id = surface.view_id();
+        debug!("Scale factor {view_id:?} changed to {}", new_factor);
     }
 
-    fn transform_changed(
-        &mut self,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-        _: &WlSurface,
-        _: Transform,
-    ) {
-    }
-
-    fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlSurface, _: u32) {
-        self.send_event(WaylandBackendEvent::Frame);
-    }
-
-    fn surface_enter(
-        &mut self,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-        _: &WlSurface,
-        _: &WlOutput,
-    ) {
-    }
-
-    fn surface_leave(
-        &mut self,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-        _: &WlSurface,
-        _: &WlOutput,
-    ) {
+    fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, surface: &SurfaceData, _: u32) {
+        surface.swap_waiting_for_frame(false);
+        self.send_event(NellyEvent::Frame);
     }
 }
-smithay_client_toolkit::delegate_compositor!(Nelly, surface: [ NellySurfaceData ]);
+crate::delegate_compositor!(Nelly);
 
 impl WindowHandler for Nelly {
-    fn request_close(
-        &mut self,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-        _: &smithay_client_toolkit::shell::xdg::window::Window,
-    ) {
-        self.events.send(WaylandBackendEvent::Close).unwrap();
+    fn request_close(&mut self, _: &Connection, _: &QueueHandle<Self>, window: &Window) {
+        self.events.send(NellyEvent::Close(window.clone())).unwrap();
     }
 
     fn configure(
         &mut self,
         _: &Connection,
         _: &QueueHandle<Self>,
-        window: &smithay_client_toolkit::shell::xdg::window::Window,
-        configure: smithay_client_toolkit::shell::xdg::window::WindowConfigure,
+        window: &Window,
+        configure: WindowConfigure,
         _: u32,
     ) {
         if let Some((width, height)) = Option::zip(configure.new_size.0, configure.new_size.1) {
             let width = u32::from(width);
             let height = u32::from(height);
             let new_size = { fluster::Size { width, height } };
-            if self.previous_size != Some(new_size) {
-                self.send_event(WaylandBackendEvent::Resize(window.clone(), new_size));
+            if window.previous_size() != Some(new_size) {
+                self.send_event(NellyEvent::Resize(window.clone(), new_size));
             }
-        } else if self.previous_size.is_none() {
-            self.send_event(WaylandBackendEvent::Resize(
+
+            if window
+                .with_previous_size(|size| size.replace(new_size))
+                .is_none()
+            {
+                // let pool = SinglePool::new(
+                //     new_size.width as i32,
+                //     new_size.height as i32,
+                //     new_size.width as i32 * 4,
+                //     wl_shm::Format::Argb8888,
+                //     &self.qh,
+                //     self.shm.wl_shm(),
+                // )
+                // .unwrap();
+
+                // debug!("Configuring window with size {:?}", new_size); // 1634x1361
+
+                // // Yeah, just attach an empty buffer. It's fine.
+
+                // window.attach(Some(pool.buffer()), 0, 0);
+                // window.commit();
+            }
+        } else if window.previous_size().is_none() {
+            self.send_event(NellyEvent::Resize(
                 window.clone(),
                 fluster::Size {
                     width: 800,
@@ -122,6 +120,5 @@ impl WindowHandler for Nelly {
         }
     }
 }
-
-smithay_client_toolkit::delegate_xdg_shell!(Nelly);
-smithay_client_toolkit::delegate_xdg_window!(Nelly);
+crate::delegate_xdg_shell!(Nelly);
+crate::delegate_xdg_window!(Nelly);

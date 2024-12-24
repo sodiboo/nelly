@@ -59,7 +59,7 @@ impl Dispatch<ZwpRelativePointerManagerV1, ()> for Nelly {
         _: &mut Self,
         _: &ZwpRelativePointerManagerV1,
         _: <ZwpRelativePointerManagerV1 as Proxy>::Event,
-        _: &(),
+        (): &(),
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
@@ -87,7 +87,7 @@ impl Dispatch<ZwpRelativePointerV1, WlPointer> for Nelly {
                 dx_unaccel,
                 dy_unaccel,
             } => {
-                let surface = data.device.nelly_surface();
+                let surface = data.device.surface_data();
                 let state = data.state.lock().unwrap();
 
                 // there's actually no way to give Flutter relative motion events

@@ -33,6 +33,8 @@ impl TouchGlobalState {
     }
 
     pub fn get_touch(&self, seat: &WlSeat, qh: &QueueHandle<Nelly>) -> Touch {
+        _ = self;
+
         let wl_touch = seat.get_touch(qh, TouchData::new());
 
         Touch { wl_touch }
@@ -78,7 +80,7 @@ impl TouchSlot {
 impl TouchData {
     pub fn new() -> Self {
         TouchData {
-            state: Default::default(),
+            state: Mutex::new(TouchState::default()),
         }
     }
 }
@@ -113,10 +115,15 @@ impl Dispatch<WlTouch, TouchData> for Nelly {
 
                 slot.device.enter(&surface);
 
+                (slot.x, slot.y) = (
+                    x * slot.device.surface_data().scale_factor(),
+                    y * slot.device.surface_data().scale_factor(),
+                );
+
                 state.events.push(PointerEvent {
-                    view_id: slot.device.nelly_surface().view_id(),
+                    view_id: slot.device.surface_data().view_id(),
                     device: slot.device.id,
-                    timestamp: Duration::from_millis(time as u64),
+                    timestamp: Duration::from_millis(u64::from(time)),
 
                     phase: PointerPhase::Down,
                     x: slot.x,
@@ -133,7 +140,7 @@ impl Dispatch<WlTouch, TouchData> for Nelly {
                     pan_y: 0.0,
                     scale: 1.0,
                     rotation: 0.0,
-                })
+                });
             }
             wl_touch::Event::Up {
                 serial: _,
@@ -146,9 +153,9 @@ impl Dispatch<WlTouch, TouchData> for Nelly {
                 };
 
                 state.events.push(PointerEvent {
-                    view_id: slot.device.nelly_surface().view_id(),
+                    view_id: slot.device.surface_data().view_id(),
                     device: slot.device.id,
-                    timestamp: Duration::from_millis(time as u64),
+                    timestamp: Duration::from_millis(u64::from(time)),
 
                     phase: PointerPhase::Up,
                     x: slot.x,
@@ -165,7 +172,7 @@ impl Dispatch<WlTouch, TouchData> for Nelly {
                     pan_y: 0.0,
                     scale: 1.0,
                     rotation: 0.0,
-                })
+                });
             }
             wl_touch::Event::Motion { time, id, x, y } => {
                 let Some(slot) = state.slots.get_mut(&id) else {
@@ -173,13 +180,15 @@ impl Dispatch<WlTouch, TouchData> for Nelly {
                     return;
                 };
 
-                slot.x = x;
-                slot.y = y;
+                (slot.x, slot.y) = (
+                    x * slot.device.surface_data().scale_factor(),
+                    y * slot.device.surface_data().scale_factor(),
+                );
 
                 state.events.push(PointerEvent {
-                    view_id: slot.device.nelly_surface().view_id(),
+                    view_id: slot.device.surface_data().view_id(),
                     device: slot.device.id,
-                    timestamp: Duration::from_millis(time as u64),
+                    timestamp: Duration::from_millis(u64::from(time)),
 
                     phase: PointerPhase::Move,
                     x: slot.x,
@@ -196,7 +205,7 @@ impl Dispatch<WlTouch, TouchData> for Nelly {
                     pan_y: 0.0,
                     scale: 1.0,
                     rotation: 0.0,
-                })
+                });
             }
             wl_touch::Event::Frame => {
                 let events = std::mem::take(&mut state.events);
@@ -206,7 +215,7 @@ impl Dispatch<WlTouch, TouchData> for Nelly {
                 state
                     .events
                     .extend(state.slots.drain().map(|(_, slot)| PointerEvent {
-                        view_id: slot.device.nelly_surface().view_id(),
+                        view_id: slot.device.surface_data().view_id(),
                         device: slot.device.id,
                         timestamp: Engine::get_current_time(),
 
@@ -225,7 +234,7 @@ impl Dispatch<WlTouch, TouchData> for Nelly {
                         pan_y: 0.0,
                         scale: 1.0,
                         rotation: 0.0,
-                    }))
+                    }));
             }
             #[allow(unused_variables)]
             wl_touch::Event::Shape { id, major, minor } => {

@@ -1,22 +1,41 @@
+[workspace]
+members = ["runner"]
+
+[workspace.package]
+version = "0.1.0"
+
+[workspace.dependencies]
+fluster = { git = "https://github.com/sodiboo/fluster" }
+fluster-build-support = { git = "https://github.com/sodiboo/fluster" }
+anyhow = "1.0.93"
+cargo = "0.84.0"
+
 [package]
 name = "nelly"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 
 [dependencies]
-anyhow = "1.0.93"
-fluster = { path = "../fluster" }
+fluster.workspace = true
+anyhow.workspace = true
+dart-sys = "4.1.5"
+elf = "0.7.4"
 input-linux = "0.7.1"
+libloading = "0.8.6"
+log = "0.4.22"
 memmap2 = "0.9.5"
 rustix = "0.38.41"
 thiserror = "2.0.3"
 tracing = "0.1.40"
-tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
+tracing-log = "0.2.0"
+tracing-subscriber = { version = "0.3.18", features = [
+    "env-filter",
+    "tracing-log",
+] }
+binary-stream = "9.1.0"
+num = "0.4.3"
 
 [dependencies.smithay-client-toolkit]
 version = "0.19.2"
 default-features = false
 features = ["calloop"]
-
-[build-dependencies]
-fluster = { path = "../fluster" }

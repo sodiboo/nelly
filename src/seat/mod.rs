@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::sync::Mutex;
 
 use smithay_client_toolkit::reexports::client::globals::GlobalList;
@@ -12,7 +13,7 @@ use smithay_client_toolkit::registry::ProvidesRegistryState;
 use smithay_client_toolkit::registry::RegistryHandler;
 
 use crate::nelly::Nelly;
-use crate::nelly::NellySurfaceData;
+use crate::shell::compositor::SurfaceData;
 
 use self::keyboard::Keyboard;
 use self::keyboard::KeyboardGlobalState;
@@ -38,7 +39,7 @@ struct DeviceData {
 impl DeviceData {
     fn new() -> Self {
         DeviceData {
-            id: DEVICE_ID.next_serial() as i32,
+            id: DEVICE_ID.next_serial().cast_signed(),
             surface: Mutex::new(None),
         }
     }
@@ -51,9 +52,9 @@ impl DeviceData {
             .expect("Received event for a device with no surface")
     }
 
-    fn nelly_surface(&self) -> NellySurfaceData {
+    fn surface_data(&self) -> SurfaceData {
         self.surface()
-            .data::<NellySurfaceData>()
+            .data::<SurfaceData>()
             .expect("WlSurface wasn't created by Nelly")
             .clone()
     }
@@ -239,7 +240,7 @@ impl Dispatch<WlSeat, SeatData> for Nelly {
                             nelly.seat_state.keyboard_state.get_keyboard(seat, qh)
                         });
                     } else if let Some(keyboard) = devices.keyboard.take() {
-                        drop(keyboard)
+                        drop(keyboard);
                     }
 
                     if capabilities.contains(wl_seat::Capability::Pointer) {
