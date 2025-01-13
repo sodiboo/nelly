@@ -20,7 +20,6 @@ include: package:lint/strict.yaml
 linter:
     rules:
         prefer_double_quotes: true
-        require_trailing_commas: false # too many false positives
-
+        # require_trailing_commas: false # too many false positives
 # Additional information about this file can be found at
 # https://dart.dev/guides/language/analysis-options

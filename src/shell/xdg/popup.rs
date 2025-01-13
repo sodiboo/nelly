@@ -3,24 +3,18 @@ use std::sync::{
     Arc, Weak,
 };
 
-use fluster::ViewId;
+use volito::ViewId;
 use smithay_client_toolkit::{
     error::GlobalError,
     globals::ProvidesBoundGlobal,
     reexports::{
-        client::{
-            protocol::{wl_compositor::WlCompositor, wl_surface},
-            Connection, Dispatch, QueueHandle,
-        },
+        client::{protocol::wl_surface, Connection, Dispatch, QueueHandle},
         protocols::{
             wp::{
-                fractional_scale::{self, v1::client::wp_fractional_scale_v1},
+                fractional_scale::v1::client::wp_fractional_scale_v1,
                 viewporter::client::wp_viewport,
             },
-            xdg::shell::client::{
-                xdg_popup, xdg_positioner, xdg_surface,
-                xdg_wm_base::{self, XdgWmBase},
-            },
+            xdg::shell::client::{xdg_popup, xdg_positioner, xdg_surface, xdg_wm_base::XdgWmBase},
         },
     },
 };
@@ -33,13 +27,13 @@ use crate::shell::{
 use super::{XdgShellSurface, XdgSurface};
 
 #[derive(Debug, Clone)]
-pub struct Popup {
+pub struct XdgPopupSurface {
     inner: Arc<PopupInner>,
 }
 
-impl Eq for Popup {}
-impl PartialEq for Popup {
-    fn eq(&self, other: &Popup) -> bool {
+impl Eq for XdgPopupSurface {}
+impl PartialEq for XdgPopupSurface {
+    fn eq(&self, other: &XdgPopupSurface) -> bool {
         Arc::ptr_eq(&self.inner, &other.inner)
     }
 }
@@ -59,7 +53,7 @@ struct PopupInner {
     configure_state: AtomicU32,
 }
 
-impl Popup {
+impl XdgPopupSurface {
     /// Create a new popup.
     ///
     /// This creates the popup and sends the initial commit.  You must wait for
@@ -71,7 +65,7 @@ impl Popup {
         compositor: &impl AsRef<CompositorState>,
         wm_base: &impl ProvidesBoundGlobal<XdgWmBase, 5>,
         view_id: ViewId,
-    ) -> Result<Popup, GlobalError>
+    ) -> Result<XdgPopupSurface, GlobalError>
     where
         D: Dispatch<wl_surface::WlSurface, SurfaceData>
             + Dispatch<wp_viewport::WpViewport, SurfaceData>
@@ -100,7 +94,7 @@ impl Popup {
         qh: &QueueHandle<D>,
         surface: impl Into<Surface>,
         wm_base: &impl ProvidesBoundGlobal<XdgWmBase, 5>,
-    ) -> Result<Popup, GlobalError>
+    ) -> Result<XdgPopupSurface, GlobalError>
     where
         D: Dispatch<xdg_surface::XdgSurface, PopupData>
             + Dispatch<xdg_popup::XdgPopup, PopupData>
@@ -142,7 +136,7 @@ impl Popup {
             }
         });
         drop(freeze);
-        Ok(Popup { inner })
+        Ok(XdgPopupSurface { inner })
     }
 
     pub fn xdg_popup(&self) -> &xdg_popup::XdgPopup {
@@ -166,13 +160,13 @@ impl Popup {
     }
 }
 
-impl WaylandSurface for Popup {
+impl WaylandSurface for XdgPopupSurface {
     fn surface(&self) -> &Surface {
         self.xdg_shell_surface().surface()
     }
 }
 
-impl XdgSurface for Popup {
+impl XdgSurface for XdgPopupSurface {
     fn xdg_surface(&self) -> &xdg_surface::XdgSurface {
         self.xdg_surface()
     }
@@ -182,9 +176,9 @@ impl PopupData {
     /// Get a new handle to the Popup
     ///
     /// This returns `None` if the popup has been destroyed.
-    pub fn popup(&self) -> Option<Popup> {
+    pub fn popup(&self) -> Option<XdgPopupSurface> {
         let inner = self.inner.upgrade()?;
-        Some(Popup { inner })
+        Some(XdgPopupSurface { inner })
     }
 }
 
@@ -228,12 +222,12 @@ pub trait PopupHandler: Sized {
         &mut self,
         conn: &Connection,
         qh: &QueueHandle<Self>,
-        popup: &Popup,
+        popup: &XdgPopupSurface,
         config: PopupConfigure,
     );
 
     /// The popup was dismissed by the compositor and should be destroyed.
-    fn done(&mut self, conn: &Connection, qh: &QueueHandle<Self>, popup: &Popup);
+    fn done(&mut self, conn: &Connection, qh: &QueueHandle<Self>, popup: &XdgPopupSurface);
 }
 
 impl<D> Dispatch<xdg_surface::XdgSurface, PopupData, D> for PopupData

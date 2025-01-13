@@ -1,17 +1,16 @@
 use std::{
-    mem,
     os::fd::OwnedFd,
     sync::{
-        atomic::{AtomicBool, AtomicI32, Ordering},
-        Arc, Mutex, MutexGuard,
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
     },
 };
 
-use fluster::ViewId;
+use volito::ViewId;
 use smithay_client_toolkit::{
     error::GlobalError,
-    globals::{GlobalData, ProvidesBoundGlobal},
-    output::{OutputData, OutputHandler, OutputState, ScaleWatcherHandle},
+    globals::ProvidesBoundGlobal,
+    output::OutputHandler,
     reexports::{
         client::{
             backend::{protocol::Message, Backend, ObjectData, ObjectId},
@@ -19,40 +18,26 @@ use smithay_client_toolkit::{
             protocol::{
                 wl_callback,
                 wl_compositor::{self, WlCompositor},
-                wl_output, wl_region,
+                wl_region,
                 wl_surface::{self, WlSurface},
             },
-            Connection, Dispatch, Proxy, QueueHandle, WEnum,
+            Connection, Dispatch, Proxy, QueueHandle,
         },
         protocols::wp::{
             fractional_scale::v1::client::{
                 wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
                 wp_fractional_scale_v1::{self, WpFractionalScaleV1},
             },
-            viewporter::{
-                self,
-                client::{
-                    wp_viewport::WpViewport,
-                    wp_viewporter::{self, WpViewporter},
-                },
-            },
+            viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
         },
     },
 };
+use tracing::{error, info};
 
 use crate::atomic_f64::AtomicF64;
 
 pub trait CompositorHandler: Sized {
     fn compositor_state(&self) -> &CompositorState;
-
-    /// The surface has either been moved into or out of an output and the output has a different scale factor.
-    fn scale_factor_changed(
-        &mut self,
-        conn: &Connection,
-        qh: &QueueHandle<Self>,
-        surface: &SurfaceData,
-        new_factor: f64,
-    );
 
     /// A frame callback has been completed.
     ///
@@ -158,7 +143,9 @@ struct SurfaceDataInner {
 
     was_mapped: AtomicBool,
 
-    previous_size: Mutex<Option<fluster::Size<u32>>>,
+    previous_size: Mutex<Option<volito::Size<u32>>>,
+
+    logical_size_constraints: Mutex<Option<LogicalSizeConstraints>>,
 
     waiting_for_frame: AtomicBool,
 }
@@ -177,6 +164,7 @@ impl SurfaceData {
                 parent_surface,
                 was_mapped: AtomicBool::new(view_id == ViewId::IMPLICIT),
                 previous_size: Mutex::new(None),
+                logical_size_constraints: Mutex::new(None),
                 waiting_for_frame: AtomicBool::new(false),
             }),
         }
@@ -195,8 +183,89 @@ impl SurfaceData {
         &self.inner.was_mapped
     }
 
-    pub fn with_previous_size<T>(&self, f: impl FnOnce(&mut Option<fluster::Size<u32>>) -> T) -> T {
-        f(&mut self.inner.previous_size.lock().unwrap())
+    pub fn previous_physical_size(&self) -> Option<volito::Size<u32>> {
+        *self.inner.previous_size.lock().unwrap()
+    }
+
+    // this function both sets `was_mapped()` to `true`, and sets `previous_size()` to `Some()` for the first time.
+    // so why isn't `was_mapped()` just defined as `previous_size().is_some()`?
+    // it's because the implicit view is always mapped, but it needs to be configured to get an initial size.
+    // so `was_mapped()` is set to true *before* the initial configuration, if and only if `view_id == ViewId::IMPLICIT`.
+    pub fn set_physical_size(&self, size: volito::Size<u32>, engine: &mut volito::Engine) {
+        let size = self
+            .physical_size_constraints()
+            .map_or(size, |constraints| {
+                constraints.constrain_physical_size(size)
+            });
+
+        let view_id = self.view_id();
+        if self.previous_physical_size() == Some(size) {
+            return;
+        }
+        let pixel_ratio = self.scale_factor();
+        let view_metrics = volito::WindowMetricsEvent {
+            view_id,
+            width: size.width as usize,
+            height: size.height as usize,
+            pixel_ratio,
+            left: 0,
+            top: 0,
+            physical_view_inset_top: 0.0,
+            physical_view_inset_right: 0.0,
+            physical_view_inset_bottom: 0.0,
+            physical_view_inset_left: 0.0,
+            display_id: 0,
+        };
+
+        if self.was_mapped().swap(true, Ordering::Relaxed) {
+            engine.send_window_metrics_event(view_metrics).unwrap();
+        } else {
+            let inner = self.inner.clone();
+            engine
+                .add_view(view_id, view_metrics, move |success| {
+                    if success {
+                        info!("Added view {view_id:?}");
+                    } else {
+                        // oopsie, didn't get to map it anyway
+                        inner.was_mapped.store(false, Ordering::Relaxed);
+                        error!("Failed to add view {view_id:?}");
+                    }
+                })
+                .unwrap()
+        }
+
+        *self.inner.previous_size.lock().unwrap() = Some(size);
+    }
+
+    pub fn physical_size_constraints(&self) -> Option<PhysicalSizeConstraints> {
+        self.inner
+            .logical_size_constraints
+            .lock()
+            .unwrap()
+            .map(|logical| logical.to_physical(self.scale_factor()))
+    }
+
+    pub fn set_logical_size_constraints(
+        &self,
+        constraints: LogicalSizeConstraints,
+        engine: &mut volito::Engine,
+    ) {
+        let prev_constraints = self
+            .inner
+            .logical_size_constraints
+            .lock()
+            .unwrap()
+            .replace(constraints);
+
+        if prev_constraints == Some(constraints) {
+            error!("set_logical_size_constraints called with the same constraints as before");
+            return;
+        }
+
+        if let Some(previous_size) = self.previous_physical_size() {
+            // reapply constraints
+            self.set_physical_size(previous_size, engine);
+        }
     }
 
     /// The parent surface used for this surface.
@@ -215,6 +284,97 @@ impl SurfaceData {
         self.inner
             .waiting_for_frame
             .swap(waiting, Ordering::Relaxed)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct LogicalSizeConstraints {
+    pub min_width: f64,
+    pub min_height: f64,
+    pub max_width: f64,
+    pub max_height: f64,
+}
+
+impl Eq for LogicalSizeConstraints {}
+impl PartialEq for LogicalSizeConstraints {
+    fn eq(&self, other: &Self) -> bool {
+        self.min_width.to_bits() == other.min_width.to_bits()
+            && self.min_height.to_bits() == other.min_height.to_bits()
+            && self.max_width.to_bits() == other.max_width.to_bits()
+            && self.max_height.to_bits() == other.max_height.to_bits()
+    }
+}
+
+impl LogicalSizeConstraints {
+    fn to_physical(self, pixel_ratio: f64) -> PhysicalSizeConstraints {
+        fn normalize(rounded: f64) -> Option<u32> {
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "bro it's checked"
+            )]
+            (rounded.is_finite() && rounded >= 0.0 && rounded <= f64::from(u32::MAX))
+                .then_some(rounded as u32)
+        }
+
+        fn min(orig: f64) -> u32 {
+            normalize(orig.ceil()).unwrap_or(0)
+        }
+
+        fn max(orig: f64) -> u32 {
+            normalize(orig.floor()).unwrap_or(u32::MAX)
+        }
+
+        PhysicalSizeConstraints {
+            min_width: min(self.min_width * pixel_ratio),
+            min_height: min(self.min_height * pixel_ratio),
+            max_width: max(self.max_width * pixel_ratio),
+            max_height: max(self.max_height * pixel_ratio),
+        }
+    }
+
+    pub fn to_wayland_constraints(self) -> Option<(i32, i32, i32, i32)> {
+        fn normalize(rounded: f64) -> Option<i32> {
+            #[expect(clippy::cast_possible_truncation, reason = "bro it's checked")]
+            (rounded.is_finite() && rounded >= 0.0 && rounded <= f64::from(i32::MAX))
+                .then_some(rounded as i32)
+        }
+
+        fn min(orig: f64) -> i32 {
+            normalize(orig.ceil()).unwrap_or(0)
+        }
+
+        fn max(orig: f64) -> i32 {
+            normalize(orig.floor()).unwrap_or(0)
+        }
+
+        let min_width = min(self.min_width);
+        let min_height = min(self.min_height);
+        let max_width = max(self.max_width);
+        let max_height = max(self.max_height);
+
+        if min_width > max_width || min_height > max_height {
+            None // will cause us to be disconnected, so don't submit anything
+        } else {
+            Some((min_width, min_height, max_width, max_height))
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PhysicalSizeConstraints {
+    pub min_width: u32,
+    pub min_height: u32,
+    pub max_width: u32,
+    pub max_height: u32,
+}
+
+impl PhysicalSizeConstraints {
+    fn constrain_physical_size(self, size: volito::Size<u32>) -> volito::Size<u32> {
+        volito::Size {
+            width: u32::clamp(size.width, self.min_width, self.max_width),
+            height: u32::clamp(size.height, self.min_height, self.max_height),
+        }
     }
 }
 
@@ -358,12 +518,12 @@ where
     D: Dispatch<WlSurface, SurfaceData> + CompositorHandler + OutputHandler + 'static,
 {
     fn event(
-        state: &mut D,
-        surface: &WlSurface,
+        _: &mut D,
+        _: &WlSurface,
         event: wl_surface::Event,
-        data: &SurfaceData,
-        conn: &Connection,
-        qh: &QueueHandle<D>,
+        _: &SurfaceData,
+        _: &Connection,
+        _: &QueueHandle<D>,
     ) {
         match event {
             wl_surface::Event::Enter { .. }
@@ -382,12 +542,12 @@ where
     D: Dispatch<WpViewport, SurfaceData> + CompositorHandler + OutputHandler + 'static,
 {
     fn event(
-        state: &mut D,
-        proxy: &WpViewport,
-        event: <WpViewport as Proxy>::Event,
-        data: &SurfaceData,
-        conn: &Connection,
-        qhandle: &QueueHandle<D>,
+        _: &mut D,
+        _: &WpViewport,
+        _: <WpViewport as Proxy>::Event,
+        _: &SurfaceData,
+        _: &Connection,
+        _: &QueueHandle<D>,
     ) {
         unreachable!("wp_viewport has no events")
     }
@@ -398,20 +558,18 @@ where
     D: Dispatch<WpFractionalScaleV1, SurfaceData> + CompositorHandler + OutputHandler + 'static,
 {
     fn event(
-        state: &mut D,
-        proxy: &WpFractionalScaleV1,
+        _: &mut D,
+        _: &WpFractionalScaleV1,
         event: <WpFractionalScaleV1 as Proxy>::Event,
         data: &SurfaceData,
-        conn: &Connection,
-        qhandle: &QueueHandle<D>,
+        _: &Connection,
+        _: &QueueHandle<D>,
     ) {
         match event {
             wp_fractional_scale_v1::Event::PreferredScale { scale } => {
                 let scale = f64::from(scale) / 120.0;
 
                 data.inner.scale_factor.store(scale);
-
-                state.scale_factor_changed(conn, qhandle, data, scale);
             }
             _ => todo!(),
         }

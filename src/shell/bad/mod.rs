@@ -1,6 +1,6 @@
 use std::sync::Mutex;
 
-use fluster::ViewId;
+use volito::ViewId;
 use smithay_client_toolkit::reexports::{
     client::protocol::{wl_buffer::WlBuffer, wl_surface::WlSurface},
     protocols::{

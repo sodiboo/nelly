@@ -1,6 +1,6 @@
 use std::{fs::File, io::Write, path::PathBuf};
 
-use fluster_build_support::{BuildError, FlutterApp};
+use volito_build_support::{BuildError, FlutterApp};
 
 fn env(name: &str) -> Option<String> {
     println!("cargo::rerun-if-env-changed={name}");
@@ -11,16 +11,19 @@ fn main() {
     let out_dir = PathBuf::from(env("OUT_DIR").unwrap());
 
     let manifest_dir = env("CARGO_MANIFEST_DIR").unwrap();
+
+    let workspace_dir = &manifest_dir[..manifest_dir.rfind('/').unwrap()];
+
     {
-        let p = PathBuf::from(&manifest_dir).join("src").join("gen.dart");
+        let p = PathBuf::from(&manifest_dir).join("lib").join("gen.dart");
 
         let mut f = File::create(p).expect("Failed to create gen.dart");
 
-        write!(f, r#"const MANIFEST_DIR = "{manifest_dir}";"#,).unwrap()
+        writeln!(f, r#"const WORKSPACE_DIR = "{workspace_dir}";"#).unwrap()
     }
 
     if let Some(app) = build_flutter_app() {
-        let mut generated = File::create(out_dir.join("app.rs")).unwrap();
+        let mut generated = File::create(out_dir.join("gen.rs")).unwrap();
 
         write!(
             generated,
@@ -46,7 +49,7 @@ fn dump_str(raw: &str) {
 }
 
 fn build_flutter_app() -> Option<FlutterApp> {
-    FlutterApp::builder().project_root(PathBuf::from(env("CARGO_MANIFEST_DIR").unwrap()).parent().unwrap()).entrypoint("src/main.dart").with_experimental_feature("macros").build().inspect_err(|err| {
+    FlutterApp::builder().project_root(PathBuf::from(env("CARGO_MANIFEST_DIR").unwrap()).parent().unwrap()).entrypoint("src/entrypoint.dart").with_experimental_feature("macros").build().inspect_err(|err| {
         match err {
         BuildError::FlutterNotFound => {
             println!("cargo::error=flutter was not found in PATH");

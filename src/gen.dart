@@ -1,1 +1,1 @@
-const MANIFEST_DIR = "/home/sodiboo/nelly";
+const WORKSPACE_DIR = "/home/sodiboo/nelly";

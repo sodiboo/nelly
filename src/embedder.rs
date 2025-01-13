@@ -1,79 +1,97 @@
 use std::{
-    cell::RefCell,
-    collections::{HashMap, HashSet},
-    marker::PhantomData,
-    path::{Path, PathBuf},
-    rc::Rc,
-    sync::{atomic::Ordering, Arc, Mutex},
+    collections::HashMap,
+    path::Path,
+    sync::{Arc, Mutex},
+    thread::ThreadId,
+    time::{Duration, Instant},
 };
 
-use fluster::{
-    AOTData, AOTDataSource, BackingStore, BackingStoreConfig, Engine, Layer, LayerContent,
-    ProjectArgs, SoftwareBackingStore, SoftwarePixelFormat, SoftwareRendererConfig, ViewId,
-    WindowMetricsEvent,
+use volito::{
+    AOTData, AOTDataSource, BackingStore, BackingStoreConfig, CustomTaskRunners, Engine,
+    LayerContent, ProjectArgs, SoftwareBackingStore, SoftwareRendererConfig, TaskRunnerDescription,
+    ViewId,
 };
 use smithay_client_toolkit::{
     reexports::{
         calloop::{
             self,
             channel::{channel, Sender},
-            LoopHandle,
+            timer::{TimeoutAction, Timer},
         },
         client::{
-            delegate_noop,
-            protocol::{
-                wl_buffer::{self, WlBuffer},
-                wl_shm, wl_shm_pool,
-                wl_surface::WlSurface,
-            },
-            Proxy, QueueHandle,
+            protocol::{wl_buffer::WlBuffer, wl_shm},
+            QueueHandle,
         },
     },
-    session_lock::SessionLockSurface,
-    shell::wlr_layer::LayerSurface,
     shm::Shm,
 };
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, error, info, trace};
 
 use crate::{
     config::Config,
     nelly::Nelly,
-    platform_message::PlatformMessage,
+    platform_message::AnyPlatformRequest,
     pool::SinglePool,
     shell::{
-        compositor::{Surface, SurfaceData},
-        xdg::{popup::Popup, window::Window},
+        compositor::Surface,
+        layer::WlrLayerSurface,
+        xdg::{popup::XdgPopupSurface, window::XdgToplevelSurface},
         WaylandSurface,
     },
 };
 
 enum EmbedderMessage {
-    Ping,
-    Vsync(fluster::VsyncBaton),
-    PlatformMessage(PlatformMessage, fluster::PlatformMessageResponse),
+    Vsync(volito::VsyncBaton),
+    PlatformMessage(AnyPlatformRequest, volito::PlatformMessageResponse),
+    Task(Instant, volito::Task),
 }
 
 pub struct Handler {
     config: Arc<Mutex<Config>>,
     msg: Sender<EmbedderMessage>,
+    signal: calloop::LoopSignal,
 }
 
-impl fluster::SoftwareRendererHandler for Handler {
-    fn surface_present(&mut self, allocation: *const u8, row_bytes: usize, height: usize) -> bool {
-        debug!("surface present");
-        true
+struct TaskRunner {
+    config: Arc<Mutex<Config>>,
+    msg: Sender<EmbedderMessage>,
+    thread: ThreadId,
+}
+
+impl volito::TaskRunnerHandler for TaskRunner {
+    fn runs_task_on_current_thread(&self) -> bool {
+        self.thread == std::thread::current().id()
+    }
+
+    fn post_task(&self, target_time: Duration, task: volito::Task) {
+        let now = volito::Engine::get_current_time();
+        let deadline = if target_time > now {
+            let delta = target_time - now;
+            Instant::now() + delta
+        } else {
+            Instant::now()
+        };
+        self.msg
+            .send(EmbedderMessage::Task(deadline, task))
+            .unwrap();
     }
 }
 
-impl fluster::EngineHandler for Handler {
+impl volito::SoftwareRendererHandler for Handler {
+    fn surface_present(&mut self, _: *const u8, _: usize, _: usize) -> bool {
+        error!("surface present; should never be called because we use a FlutterCompositor?");
+        false
+    }
+}
+
+impl volito::EngineHandler for Handler {
     fn platform_message(
         &mut self,
         channel: &std::ffi::CStr,
         message: &[u8],
-        response: fluster::PlatformMessageResponse,
+        response: volito::PlatformMessageResponse,
     ) {
-        info!("received platform message: {channel:?}, {message:?}");
-        match PlatformMessage::decode(channel, message) {
+        match AnyPlatformRequest::decode(channel, message) {
             Ok(message) => {
                 info!("decoded platform message: {message:?}");
                 self.msg
@@ -81,24 +99,29 @@ impl fluster::EngineHandler for Handler {
                     .unwrap()
             }
             Err(e) => {
-                error!("{e:?}");
+                // flutter has a bunch of default channels that we don't care about or handle
+                if !channel.to_bytes().starts_with(b"flutter/") {
+                    error!("{e:?}");
+                }
                 response.send(&[]).unwrap(); // send empty response, avoids memory leak
             }
         }
+
+        self.signal.wakeup();
     }
 
-    fn vsync(&mut self, baton: fluster::VsyncBaton) {
+    fn vsync(&mut self, baton: volito::VsyncBaton) {
         self.msg.send(EmbedderMessage::Vsync(baton)).unwrap();
     }
 
-    fn update_semantics(&mut self, update: fluster::SemanticsUpdate) {
+    fn update_semantics(&mut self, _update: volito::SemanticsUpdate) {
         debug!("update semantics");
     }
 
     fn log_message(&mut self, tag: &std::ffi::CStr, message: &std::ffi::CStr) {
         let tag = tag.to_string_lossy();
         let message = message.to_string_lossy();
-        log::info!(target: &tag, "{message}");
+        ::dart_tracing::log_info_with_tag(&tag, &message);
     }
 
     fn on_pre_engine_restart(&mut self) {
@@ -106,7 +129,7 @@ impl fluster::EngineHandler for Handler {
     }
 
     fn channel_update(&mut self, channel: &std::ffi::CStr, listening: bool) {
-        debug!("channel update: {channel:?}, {listening}");
+        trace!("channel update: {channel:?}, {listening}");
     }
 
     fn root_isolate_created(&mut self) {
@@ -124,9 +147,9 @@ impl From<PixelFormat> for wl_shm::Format {
     }
 }
 
-impl From<PixelFormat> for fluster::SoftwarePixelFormat {
+impl From<PixelFormat> for volito::SoftwarePixelFormat {
     fn from(PixelFormat: PixelFormat) -> Self {
-        fluster::SoftwarePixelFormat::BGRA8888 // [u8; 4]
+        volito::SoftwarePixelFormat::BGRA8888 // [u8; 4]
     }
 }
 
@@ -146,6 +169,7 @@ unsafe impl Sync for BackingStoreAllocation {}
 struct NellyCompositor {
     config: Arc<Mutex<Config>>,
     msg: Sender<EmbedderMessage>,
+    signal: calloop::LoopSignal,
 
     qh: QueueHandle<Nelly>,
     wl_shm: wl_shm::WlShm,
@@ -155,27 +179,10 @@ struct NellyCompositor {
     views: Arc<Mutex<HashMap<ViewId, FlutterWaylandSurface>>>,
 }
 
-impl NellyCompositor {
-    /// Embedder callbacks are invoked on the Flutter Engine's own threads.
-    /// As such, they don't run in the event loop, and any requests they make
-    /// on Wayland objects may not be flushed immediately. This is because those
-    /// requests are queued up, and the event loop flushes them at the end of the
-    /// event loop iteration, and not after each event.
-    ///
-    /// This means that if the event queue is just waiting, it will block indefinitely
-    /// until an event occurs. And if no events occur, it will think that nothing is happening.
-    /// And if nothing is happening, it will not flush the queue.
-    ///
-    /// To mitigate this, we send a ping message to the event loop to wake it up.
-    /// This is a no-op, but it will cause the event loop to complete an iteration and flush the queue.
-    fn ping_queue(&self) {
-        self.msg.send(EmbedderMessage::Ping).unwrap();
-    }
-}
-
 pub enum FlutterWaylandSurface {
-    XdgToplevel(Window),
-    XdgPopup(Popup),
+    WlrLayer(WlrLayerSurface),
+    XdgToplevel(XdgToplevelSurface),
+    XdgPopup(XdgPopupSurface),
     // SessionLock(SessionLockSurface),
     // Layer(LayerSurface),
 }
@@ -183,20 +190,27 @@ pub enum FlutterWaylandSurface {
 impl WaylandSurface for FlutterWaylandSurface {
     fn surface(&self) -> &Surface {
         match self {
+            FlutterWaylandSurface::WlrLayer(layer) => layer.surface(),
             FlutterWaylandSurface::XdgToplevel(toplevel) => toplevel.surface(),
             FlutterWaylandSurface::XdgPopup(popup) => popup.surface(),
         }
     }
 }
 
-impl From<Window> for FlutterWaylandSurface {
-    fn from(window: Window) -> Self {
+impl From<WlrLayerSurface> for FlutterWaylandSurface {
+    fn from(layer: WlrLayerSurface) -> Self {
+        FlutterWaylandSurface::WlrLayer(layer)
+    }
+}
+
+impl From<XdgToplevelSurface> for FlutterWaylandSurface {
+    fn from(window: XdgToplevelSurface) -> Self {
         FlutterWaylandSurface::XdgToplevel(window)
     }
 }
 
-impl From<Popup> for FlutterWaylandSurface {
-    fn from(popup: Popup) -> Self {
+impl From<XdgPopupSurface> for FlutterWaylandSurface {
+    fn from(popup: XdgPopupSurface) -> Self {
         FlutterWaylandSurface::XdgPopup(popup)
     }
 }
@@ -207,13 +221,7 @@ impl From<Popup> for FlutterWaylandSurface {
 //     }
 // }
 
-// impl From<LayerSurface> for FlutterWaylandSurface {
-//     fn from(layer: LayerSurface) -> Self {
-//         FlutterWaylandSurface::Layer(layer)
-//     }
-// }
-
-impl fluster::CompositorHandler for NellyCompositor {
+impl volito::CompositorHandler for NellyCompositor {
     fn create_backing_store(&mut self, config: BackingStoreConfig) -> Option<BackingStore> {
         if config.size.width.fract() != 0.0 || config.size.height.fract() != 0.0 {
             error!(
@@ -258,7 +266,7 @@ impl fluster::CompositorHandler for NellyCompositor {
         self.buffers
             .insert(BackingStoreAllocation(allocation), pool.buffer().clone());
 
-        self.ping_queue();
+        self.signal.wakeup();
 
         #[allow(clippy::cast_sign_loss, reason = "checked")]
         Some(BackingStore::Software(SoftwareBackingStore {
@@ -278,7 +286,7 @@ impl fluster::CompositorHandler for NellyCompositor {
             BackingStore::Software(SoftwareBackingStore { allocation, .. }) => {
                 // drop glue is in an Arc that the WlBuffer still holds a strong reference to
                 self.buffers.remove(&BackingStoreAllocation(allocation));
-                self.ping_queue();
+                self.signal.wakeup();
                 true
             }
             _ => {
@@ -288,7 +296,7 @@ impl fluster::CompositorHandler for NellyCompositor {
         }
     }
 
-    fn present_view(&mut self, view_id: ViewId, layers: &[fluster::Layer]) -> bool {
+    fn present_view(&mut self, view_id: ViewId, layers: &[volito::Layer]) -> bool {
         let views = self.views.lock().unwrap();
         let Some(view) = views.get(&view_id) else {
             error!("flutter gave me a view id i don't know about");
@@ -353,7 +361,7 @@ impl fluster::CompositorHandler for NellyCompositor {
 
         view.commit();
 
-        self.ping_queue();
+        self.signal.wakeup();
 
         true
     }
@@ -363,11 +371,13 @@ pub fn init(
     assets_path: &Path,
     app_library: Option<&Path>,
     config: &Arc<Mutex<Config>>,
-    loop_handle: &LoopHandle<'static, Nelly>,
+    event_loop: &calloop::EventLoop<'static, Nelly>,
     shm: &Shm,
     qh: &QueueHandle<Nelly>,
     views: Arc<Mutex<HashMap<ViewId, FlutterWaylandSurface>>>,
 ) -> anyhow::Result<Engine> {
+    let platform_thread = std::thread::current().id();
+
     let aot_data = app_library
         .map(Path::to_path_buf)
         .map(AOTDataSource::ElfPath)
@@ -390,12 +400,12 @@ pub fn init(
 
     let (send, chan) = channel();
 
-    loop_handle
-        .insert_source(chan, |msg, (), nelly| {
+    event_loop
+        .handle()
+        .insert_source(chan, move |msg, (), nelly| {
             match msg {
                 calloop::channel::Event::Msg(msg) => {
                     match msg {
-                        EmbedderMessage::Ping => {}
                         EmbedderMessage::Vsync(vsync_baton) => {
                             // debug!("vsync: {:?}", vsync_baton);
                             nelly
@@ -418,6 +428,20 @@ pub fn init(
                                 }
                             }
                         }
+                        EmbedderMessage::Task(deadline, task) => {
+                            let mut task = Some(task);
+                            nelly
+                                .loop_handle
+                                .insert_source(
+                                    Timer::from_deadline(deadline),
+                                    move |_, (), nelly| {
+                                        assert!(std::thread::current().id() == platform_thread);
+                                        nelly.engine().run_task(task.take().unwrap()).unwrap();
+                                        TimeoutAction::Drop
+                                    },
+                                )
+                                .unwrap();
+                        }
                     };
                 }
                 calloop::channel::Event::Closed => {
@@ -432,6 +456,7 @@ pub fn init(
             handler: Box::new(Handler {
                 config: config.clone(),
                 msg: send.clone(),
+                signal: event_loop.get_signal(),
             }),
         },
         ProjectArgs {
@@ -443,13 +468,25 @@ pub fn init(
             persistent_cache_path: None,
             is_persistent_cache_read_only: true,
             custom_dart_entrypoint: None,
-            custom_task_runners: None,
+            custom_task_runners: Some(CustomTaskRunners {
+                platform_task_runner: Some(TaskRunnerDescription {
+                    identifier: 1,
+                    handler: Box::new(TaskRunner {
+                        config: config.clone(),
+                        msg: send.clone(),
+                        thread: platform_thread,
+                    }),
+                }),
+                render_task_runner: None,
+                set_thread_priority: None,
+            }),
             shutdown_dart_vm_when_done: true,
-            compositor: Some(fluster::Compositor {
+            compositor: Some(volito::Compositor {
                 avoid_backing_store_cache: true,
                 handler: Box::new(NellyCompositor {
                     config: config.clone(),
                     msg: send.clone(),
+                    signal: event_loop.get_signal(),
                     qh: qh.clone(),
                     wl_shm: shm.wl_shm().clone(),
                     buffers: HashMap::new(),
@@ -462,6 +499,7 @@ pub fn init(
             handler: Box::new(Handler {
                 config: config.clone(),
                 msg: send.clone(),
+                signal: event_loop.get_signal(),
             }),
             compute_platform_resolved_locale: None,
         },

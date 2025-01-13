@@ -4,20 +4,6 @@
 import "dart:convert";
 import "dart:ffi";
 
-// final class ByteSlice extends Struct {
-//   external Pointer<Uint8> ptr;
-
-//   @Size()
-//   external int len;
-// }
-
-// final class OwnedString implements Finalizable {
-//   final Pointer<Uint8> ptr;
-//   final int len;
-
-//   OwnedString(this.ptr, this.len);
-// }
-
 @Native<
     Void Function(
       Size level,
@@ -29,7 +15,7 @@ import "dart:ffi";
       Pointer<Uint8> file,
       Size fileLength,
     )>(isLeaf: true)
-external void nelly_ffi_log(
+external void dart_tracing_log(
   int level,
   int line,
   Pointer<Uint8> target,
@@ -45,7 +31,7 @@ void log(int level, String target, String file, int line, String message) {
   final fileUtf8 = utf8.encode(file);
   final messageUtf8 = utf8.encode(message);
 
-  nelly_ffi_log(
+  dart_tracing_log(
     level,
     line,
     targetUtf8.address,
@@ -58,9 +44,9 @@ void log(int level, String target, String file, int line, String message) {
 }
 
 @Native<Void Function(Pointer<Uint8> message, Size len)>(isLeaf: true)
-external void nelly_ffi_println(Pointer<Uint8> message, int length);
+external void dart_tracing_println(Pointer<Uint8> message, int length);
 
 void println(String msg) {
   final msgUtf8 = utf8.encode(msg);
-  nelly_ffi_println(msgUtf8.address, msgUtf8.length);
+  dart_tracing_println(msgUtf8.address, msgUtf8.length);
 }

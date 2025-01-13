@@ -167,12 +167,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "96a6ac251f4a2aca6b3f91340350eab87ae57c3f127ffeb585e92bd336717991"
 
 [[package]]
-name = "dart-sys"
-version = "4.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "57967e4b200d767d091b961d6ab42cc7d0cc14fe9e052e75d0d3cf9eb732d895"
+name = "dart_tracing"
+version = "0.1.0"
 dependencies = [
- "cc",
+ "log",
 ]
 
 [[package]]
@@ -213,22 +211,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "fluster"
+name = "generated"
 version = "0.1.0"
-source = "git+https://github.com/sodiboo/fluster#a0979ccfb533119291571a1e6cb86816fee9f4c9"
 dependencies = [
- "bindgen",
- "const_format",
- "pkg-config",
- "tracing",
-]
-
-[[package]]
-name = "fluster-build-support"
-version = "0.1.0"
-source = "git+https://github.com/sodiboo/fluster#a0979ccfb533119291571a1e6cb86816fee9f4c9"
-dependencies = [
- "which",
+ "volito",
+ "volito-build-support",
 ]
 
 [[package]]
@@ -351,20 +338,19 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "binary-stream",
- "dart-sys",
+ "bitflags",
+ "dart_tracing",
  "elf",
- "fluster",
  "input-linux",
  "libloading",
- "log",
  "memmap2",
  "num",
  "rustix",
  "smithay-client-toolkit",
  "thiserror 2.0.3",
  "tracing",
- "tracing-log",
  "tracing-subscriber",
+ "volito",
 ]
 
 [[package]]
@@ -372,8 +358,7 @@ name = "nelly-runner"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "fluster",
- "fluster-build-support",
+ "generated",
  "nelly",
 ]
 
@@ -803,9 +788,9 @@ dependencies = [
 
 [[package]]
 name = "tracing-subscriber"
-version = "0.3.18"
+version = "0.3.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ad0f048c97dbd9faa9b7df56362b8ebcaa52adb06b498c050d2f4e32f90a7a8b"
+checksum = "e8189decb5ac0fa7bc8b96b7cb9b2701d60d48805aca84a238004d665fcc4008"
 dependencies = [
  "matchers",
  "nu-ansi-term",
@@ -836,6 +821,23 @@ name = "valuable"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "830b7e5d4d90034032940e4ace0d9a9a057e7a45cd94e6c007832e39edb82f6d"
+
+[[package]]
+name = "volito"
+version = "0.1.0"
+dependencies = [
+ "bindgen",
+ "const_format",
+ "pkg-config",
+ "tracing",
+]
+
+[[package]]
+name = "volito-build-support"
+version = "0.1.0"
+dependencies = [
+ "which",
+]
 
 [[package]]
 name = "wayland-backend"

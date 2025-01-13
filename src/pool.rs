@@ -1,8 +1,3 @@
-//! A raw shared memory pool handler.
-//!
-//! This is intended as a safe building block for higher level shared memory pool abstractions and is not
-//! encouraged for most library users.
-
 use rustix::{
     io::Errno,
     shm::{Mode, ShmOFlags},
@@ -11,13 +6,9 @@ use std::{
     fs::File,
     io,
     os::unix::prelude::{AsFd, OwnedFd},
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
-use tracing::{debug, trace};
 
 use memmap2::MmapRaw;
 use smithay_client_toolkit::reexports::client::{
@@ -40,7 +31,7 @@ pub struct SinglePool {
 
 #[derive(Debug)]
 pub struct BufferBacking {
-    pub mem_file: File,
+    pub _mem_file: File,
     pub mmap: MmapRaw,
 }
 
@@ -87,7 +78,10 @@ impl SinglePool {
         let pool = shm.create_pool(mem_file.as_fd(), size, qh, ());
         let mmap = MmapRaw::map_raw(&mem_file)?;
 
-        let backing = Arc::new(BufferBacking { mem_file, mmap });
+        let backing = Arc::new(BufferBacking {
+            _mem_file: mem_file,
+            mmap,
+        });
 
         let buffer = pool.create_buffer(0, width, height, stride, format, qh, backing.clone());
 

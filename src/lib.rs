@@ -2,8 +2,7 @@
 #![feature(integer_sign_cast)]
 #![warn(clippy::pedantic)]
 #![allow(
-    unused_imports,
-    unused_variables,
+    // unused_imports,
     dead_code,
     clippy::too_many_lines,
     clippy::struct_field_names,
@@ -12,24 +11,12 @@
 )]
 #![deny(clippy::print_stderr, clippy::print_stdout)] // use tracing instead
 
-use std::{
-    cell::RefCell,
-    path::Path,
-    rc::Rc,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::path::Path;
 
 use config::Config;
 use nelly::Nelly;
-use smithay_client_toolkit::reexports::calloop::{
-    self,
-    timer::{TimeoutAction, Timer},
-    EventLoop,
-};
-use tracing::{debug, level_filters::LevelFilter, trace, Level, Metadata};
-use tracing_log::{AsLog, LogTracer};
-use tracing_subscriber::{filter::FilterExt, EnvFilter};
+use smithay_client_toolkit::reexports::calloop::EventLoop;
+use tracing_subscriber::EnvFilter;
 
 mod engine_meta {
     include!(concat!(env!("OUT_DIR"), "/engine_meta.rs"));
@@ -38,33 +25,39 @@ mod engine_meta {
 mod atomic_f64;
 mod config;
 mod embedder;
-pub mod ffi;
 mod nelly;
 mod platform_message;
 mod pool;
 mod shell;
 
-const DEFAULT_LOG_FILTER: &str = "nelly=trace,fluster=trace";
+const DEFAULT_LOG_FILTER: &str = "nelly=trace,volito=trace";
 
+// this is the entrypoint.
+// it just gets paths to the compile output of the Dart half of the app.
+// the actual main() is in `/runner/src/main.rs`
+// but distro packagers may wish to write a different runner to compile the Dart half without Cargo.
 pub fn run(assets_path: &Path, app_library: Option<&Path>) -> anyhow::Result<()> {
-    let rust_log = std::env::var("RUST_LOG").ok();
     tracing_subscriber::fmt()
         .pretty()
         .with_env_filter(
-            EnvFilter::builder().parse_lossy(rust_log.as_deref().unwrap_or(DEFAULT_LOG_FILTER)),
+            EnvFilter::builder().parse_lossy(
+                std::env::var("RUST_LOG")
+                    .ok()
+                    .as_deref()
+                    .unwrap_or(DEFAULT_LOG_FILTER),
+            ),
         )
         .init();
+
     let mut event_loop = EventLoop::try_new()?;
 
-    let config = Arc::new(Mutex::new(Config::load()));
-
-    trace!("main() on thread {:?}", std::thread::current().id());
-
-    let mut nelly = Nelly::new(assets_path, app_library, &config, event_loop.handle())?;
-
-    event_loop.run(None, &mut nelly, |state| {
-        _ = state;
-    })?;
-
-    Ok(())
+    event_loop
+        .run(
+            None,
+            &mut Nelly::new(assets_path, app_library, &Config::load(), &event_loop)?,
+            |nelly| {
+                _ = nelly; // do absolutely nothing
+            },
+        )
+        .map_err(Into::into)
 }

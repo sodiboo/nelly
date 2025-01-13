@@ -1,20 +1,16 @@
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
-
 use smithay_client_toolkit::output::{OutputHandler, OutputState};
-use smithay_client_toolkit::reexports::client::protocol::wl_output::{Transform, WlOutput};
-use smithay_client_toolkit::reexports::client::protocol::wl_surface::WlSurface;
+use smithay_client_toolkit::reexports::client::protocol::wl_output::WlOutput;
 use smithay_client_toolkit::reexports::client::{Connection, QueueHandle};
 use smithay_client_toolkit::registry::{ProvidesRegistryState, RegistryState};
 use smithay_client_toolkit::registry_handlers;
 use smithay_client_toolkit::shm::ShmHandler;
 use tracing::debug;
 
-use crate::pool::{BufferBacking, SinglePool};
+use crate::platform_message::PlatformEvent;
 use crate::shell::compositor::{CompositorHandler, CompositorState, SurfaceData};
-use crate::shell::xdg::window::{Window, WindowConfigure, WindowHandler};
+use crate::shell::layer::LayerShellHandler;
+use crate::shell::xdg::window::{WindowConfigure, WindowHandler, XdgToplevelSurface};
 use crate::shell::WaylandSurface;
-use crate::{delegate_compositor, delegate_xdg_shell, delegate_xdg_window};
 
 use super::{Nelly, NellyEvent};
 
@@ -49,17 +45,6 @@ impl CompositorHandler for Nelly {
         &self.compositor_state
     }
 
-    fn scale_factor_changed(
-        &mut self,
-        conn: &Connection,
-        qh: &QueueHandle<Self>,
-        surface: &SurfaceData,
-        new_factor: f64,
-    ) {
-        let view_id = surface.view_id();
-        debug!("Scale factor {view_id:?} changed to {}", new_factor);
-    }
-
     fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, surface: &SurfaceData, _: u32) {
         surface.swap_waiting_for_frame(false);
         self.send_event(NellyEvent::Frame);
@@ -68,57 +53,88 @@ impl CompositorHandler for Nelly {
 crate::delegate_compositor!(Nelly);
 
 impl WindowHandler for Nelly {
-    fn request_close(&mut self, _: &Connection, _: &QueueHandle<Self>, window: &Window) {
-        self.events.send(NellyEvent::Close(window.clone())).unwrap();
+    fn request_close(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        window: &XdgToplevelSurface,
+    ) {
+        let view_id = window.view_id();
+        crate::platform_message::xdg_toplevel::Close { view_id }
+            .send(self, |response, nelly| {
+                // no need to do anything with the response. but we still hanve a callback here :3
+                let () = response.unwrap();
+                _ = nelly;
+            })
+            .unwrap();
     }
 
     fn configure(
         &mut self,
         _: &Connection,
         _: &QueueHandle<Self>,
-        window: &Window,
+        window: &XdgToplevelSurface,
         configure: WindowConfigure,
         _: u32,
     ) {
-        if let Some((width, height)) = Option::zip(configure.new_size.0, configure.new_size.1) {
-            let width = u32::from(width);
-            let height = u32::from(height);
-            let new_size = { fluster::Size { width, height } };
-            if window.previous_size() != Some(new_size) {
-                self.send_event(NellyEvent::Resize(window.clone(), new_size));
+        let new_size_logical = {
+            let default_dim = window.previous_physical_size().unwrap_or(volito::Size {
+                width: 800,
+                height: 600,
+            });
+            let (width, height) = configure.new_size;
+
+            volito::Size {
+                width: width.map_or(default_dim.width, u32::from),
+                height: height.map_or(default_dim.height, u32::from),
             }
+        };
 
-            if window
-                .with_previous_size(|size| size.replace(new_size))
-                .is_none()
-            {
-                // let pool = SinglePool::new(
-                //     new_size.width as i32,
-                //     new_size.height as i32,
-                //     new_size.width as i32 * 4,
-                //     wl_shm::Format::Argb8888,
-                //     &self.qh,
-                //     self.shm.wl_shm(),
-                // )
-                // .unwrap();
+        let view_id = window.view_id();
+        let pixel_ratio = window.surface().data().scale_factor();
+        debug!(
+            "Resizing window {view_id:?} to {}",
+            format_args!("{}x{}", new_size_logical.width, new_size_logical.height)
+        );
 
-                // debug!("Configuring window with size {:?}", new_size); // 1634x1361
-
-                // // Yeah, just attach an empty buffer. It's fine.
-
-                // window.attach(Some(pool.buffer()), 0, 0);
-                // window.commit();
+        let new_size_physical = {
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "i promise you it's fine"
+            )]
+            volito::Size {
+                width: (f64::from(new_size_logical.width) * pixel_ratio).round() as u32,
+                height: (f64::from(new_size_logical.height) * pixel_ratio).round() as u32,
             }
-        } else if window.previous_size().is_none() {
-            self.send_event(NellyEvent::Resize(
-                window.clone(),
-                fluster::Size {
-                    width: 800,
-                    height: 600,
-                },
-            ));
-        }
+        };
+
+        window.set_physical_size(new_size_physical, self.engine());
     }
 }
 crate::delegate_xdg_shell!(Nelly);
 crate::delegate_xdg_window!(Nelly);
+
+impl LayerShellHandler for Nelly {
+    fn closed(
+        &mut self,
+        _: &Connection,
+        _qh: &QueueHandle<Self>,
+        _layer: &crate::shell::layer::WlrLayerSurface,
+    ) {
+        tracing::error!("Layer surface was closed");
+    }
+
+    fn configure(
+        &mut self,
+        _: &Connection,
+        _qh: &QueueHandle<Self>,
+        _layer: &crate::shell::layer::WlrLayerSurface,
+        _configure: crate::shell::layer::LayerSurfaceConfigure,
+        _serial: u32,
+    ) {
+        tracing::debug!("Layer surface was configured");
+    }
+}
+
+crate::delegate_layer!(Nelly);

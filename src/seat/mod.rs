@@ -61,7 +61,10 @@ impl DeviceData {
 
     fn enter(&self, surface: &WlSurface) -> &DeviceData {
         let prev = self.surface.lock().unwrap().replace(surface.clone());
-        assert_eq!(prev, None, "Device already entered a surface");
+        if let Some(prev) = prev {
+            // if surface is dead, then we semantically left it.
+            assert!(!prev.is_alive(), "Device already entered a surface");
+        }
         self
     }
 

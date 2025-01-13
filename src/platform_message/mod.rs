@@ -1,51 +1,25 @@
 use std::{
     ffi::CStr,
     io::{Read, Result, Seek, Write},
-    sync::atomic::{AtomicI64, AtomicU64, Ordering},
+    sync::atomic::{AtomicI64, Ordering},
 };
 
-use fluster::ViewId;
+use binary::BinaryDecodable;
+use volito::ViewId;
 
-use crate::{
-    embedder::FlutterWaylandSurface,
-    nelly::Nelly,
-    shell::{xdg::window::WindowDecorations, WaylandSurface},
-};
+use crate::nelly::Nelly;
 
 mod binary;
-mod xdg_toplevel;
+pub mod shutdown;
+pub mod wlr_layer;
+pub mod xdg_toplevel;
 
 use self::binary::{BinaryReader, BinaryWriter};
-pub use self::xdg_toplevel::{CreateXdgToplevel, RemoveXdgToplevel, UpdateXdgToplevel};
 
-trait RawPlatformMessage: std::fmt::Debug + Sized {
+trait PlatformRequest: std::fmt::Debug + BinaryDecodable {
     const CHANNEL: &'static CStr;
-
-    fn decode(data: &[u8]) -> Result<Self>;
-
-    fn run(self, nelly: &mut Nelly) -> Result<Vec<u8>>;
-}
-
-trait ManagedPlatformMessage: std::fmt::Debug + Sized {
-    const CHANNEL: &'static CStr;
-
-    fn decode(reader: &mut BinaryReader<impl Read + Seek>) -> Result<Self>;
 
     fn run(self, nelly: &mut Nelly, writer: &mut BinaryWriter<impl Write>) -> Result<()>;
-}
-
-impl<T: ManagedPlatformMessage> RawPlatformMessage for T {
-    const CHANNEL: &'static CStr = T::CHANNEL;
-
-    fn decode(data: &[u8]) -> Result<Self> {
-        T::decode(&mut BinaryReader::from(data))
-    }
-
-    fn run(self, nelly: &mut Nelly) -> Result<Vec<u8>> {
-        let mut bytes = Vec::new();
-        self.run(nelly, &mut BinaryWriter::new(&mut bytes))?;
-        Ok(bytes)
-    }
 }
 
 #[derive(Debug)]
@@ -86,22 +60,22 @@ macro_rules! all_platform_message {
 
         impl $name {
             #[allow(non_upper_case_globals)]
-            pub fn decode(channel: &CStr, data: &[u8]) -> Result<Self> {
+            pub fn _decode(channel: &CStr, reader: &mut BinaryReader<impl Read + Seek>) -> Result<Self> {
                 $(
-                    const $variant: &[u8] = <$ty as RawPlatformMessage>::CHANNEL.to_bytes();
+                    const $variant: &[u8] = <$ty as PlatformRequest>::CHANNEL.to_bytes();
                 )*
                 match channel.to_bytes() {
                     $(
-                        $variant => <$ty as RawPlatformMessage>::decode(data).map($name::$variant),
+                        $variant => <$ty as BinaryDecodable>::decode(reader).map($name::$variant),
                     )*
                     _ => Err(Self::_unknown_channel(channel)),
                 }
             }
 
-            pub fn run(self, nelly: &mut Nelly) -> Result<Vec<u8>> {
+            pub fn _run(self, nelly: &mut Nelly, writer: &mut BinaryWriter<impl Write>) -> Result<()> {
                 match self {
                     $(
-                        $name::$variant(msg) => <$ty as RawPlatformMessage>::run(msg, nelly),
+                        $name::$variant(msg) => <$ty as PlatformRequest>::run(msg, nelly, writer),
                     )*
                 }
             }
@@ -111,18 +85,103 @@ macro_rules! all_platform_message {
 
 all_platform_message!(
     #[derive(Debug)]
-    pub enum PlatformMessage {
-        CreateXdgToplevel(CreateXdgToplevel),
-        UpdateXdgToplevel(UpdateXdgToplevel),
-        RemoveXdgToplevel(RemoveXdgToplevel),
+    pub enum AnyPlatformRequest {
+        Shutdown(shutdown::Shutdown),
+
+        XdgToplevelCreate(xdg_toplevel::Create),
+        XdgToplevelInitialCommit(xdg_toplevel::InitialCommit),
+        XdgToplevelUpdate(xdg_toplevel::Update),
+        XdgToplevelUpdateViewConstraints(xdg_toplevel::UpdateViewConstraints),
+        XdgToplevelRemove(xdg_toplevel::Remove),
+
+        WlrLayerCreate(wlr_layer::Create),
+        WlrLayerUpdate(wlr_layer::Update),
+        WlrLayerRemove(wlr_layer::Remove),
     }
 );
 
-impl PlatformMessage {
+impl AnyPlatformRequest {
     fn _unknown_channel(channel: &CStr) -> std::io::Error {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "unknown platform message channel",
+            format!(
+                "unknown platform message channel: {}",
+                channel.to_string_lossy()
+            ),
         )
+    }
+
+    pub fn decode(channel: &CStr, data: &[u8]) -> Result<Self> {
+        let mut reader = BinaryReader::from(data);
+
+        let decoded = Self::_decode(channel, &mut reader)?;
+
+        reader.assert_finished()?;
+
+        Ok(decoded)
+    }
+
+    pub fn run(self, nelly: &mut Nelly) -> Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+
+        self._run(nelly, &mut BinaryWriter::new(&mut bytes))?;
+
+        Ok(bytes)
+    }
+}
+
+pub trait PlatformEvent {
+    const CHANNEL: &'static CStr;
+
+    type Response: 'static;
+
+    fn encode(&self) -> Result<Vec<u8>>;
+
+    fn decode_response(data: &[u8]) -> Result<Self::Response>;
+
+    fn send(
+        &self,
+        nelly: &mut Nelly,
+        f: impl FnOnce(Result<Self::Response>, &mut Nelly) + 'static,
+    ) -> Result<()> {
+        let data = self.encode()?;
+
+        let loop_handle = nelly.loop_handle.clone();
+        let loop_signal = nelly.loop_signal.clone();
+
+        nelly
+            .engine()
+            .send_platform_message(Self::CHANNEL, data.as_slice(), move |response| {
+                let response = Self::decode_response(response);
+                loop_handle.insert_idle(|nelly| f(response, nelly));
+                loop_signal.wakeup();
+            })
+            .map_err(Into::into)
+    }
+}
+
+trait ManagedPlatformEvent {
+    const CHANNEL: &'static CStr;
+
+    type Response: 'static;
+
+    fn encode(&self, writer: &mut BinaryWriter<impl Write>) -> Result<()>;
+
+    fn decode_response(reader: &mut BinaryReader<impl Read + Seek>) -> Result<Self::Response>;
+}
+
+impl<R: 'static, T: ManagedPlatformEvent<Response = R>> PlatformEvent for T {
+    const CHANNEL: &'static CStr = Self::CHANNEL;
+
+    type Response = R;
+
+    fn encode(&self) -> Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        self.encode(&mut BinaryWriter::new(&mut bytes))?;
+        Ok(bytes)
+    }
+
+    fn decode_response(data: &[u8]) -> Result<Self::Response> {
+        T::decode_response(&mut BinaryReader::from(data))
     }
 }

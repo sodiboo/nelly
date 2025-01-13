@@ -1,0 +1,9 @@
+name: generated
+publish_to: none
+
+version: 1.0.0
+
+environment:
+    sdk: ^3.5.3
+
+resolution: workspace

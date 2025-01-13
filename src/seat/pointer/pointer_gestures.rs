@@ -3,7 +3,7 @@ use std::{
     time::Duration,
 };
 
-use fluster::{PointerDeviceKind, PointerEvent, PointerPhase, PointerSignalKind};
+use volito::{PointerDeviceKind, PointerEvent, PointerPhase, PointerSignalKind};
 use smithay_client_toolkit::{
     error::GlobalError,
     reexports::{

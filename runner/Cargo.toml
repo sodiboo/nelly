@@ -9,8 +9,5 @@ build-in-cargo = []
 
 [dependencies]
 nelly.path = ".."
+generated.path = "../generated"
 anyhow.workspace = true
-fluster.workspace = true # required for linkage metadata
-
-[build-dependencies]
-fluster-build-support.workspace = true

@@ -1,6 +1,6 @@
 use std::sync::atomic::AtomicBool;
 
-use fluster::ViewId;
+use volito::ViewId;
 use smithay_client_toolkit::reexports::{
     client::{
         protocol::{
@@ -23,6 +23,7 @@ use self::compositor::Surface;
 pub mod compositor;
 pub mod layer;
 
+#[allow(clippy::pedantic)]
 pub mod xdg;
 
 /// An unsupported operation, often due to the version of the protocol.
@@ -36,6 +37,7 @@ pub trait WaylandSurface: Sized {
     fn view_id(&self) -> ViewId {
         self.surface().data().view_id()
     }
+
     fn wl_surface(&self) -> &WlSurface {
         self.surface().wl_surface()
     }
@@ -72,12 +74,12 @@ pub trait WaylandSurface: Sized {
         self.surface().data().was_mapped()
     }
 
-    fn with_previous_size<T>(&self, f: impl FnOnce(&mut Option<fluster::Size<u32>>) -> T) -> T {
-        self.surface().data().with_previous_size(f)
+    fn previous_physical_size(&self) -> Option<volito::Size<u32>> {
+        self.surface().data().previous_physical_size()
     }
 
-    fn previous_size(&self) -> Option<fluster::Size<u32>> {
-        self.surface().data().with_previous_size(|size| *size)
+    fn set_physical_size(&self, size: volito::Size<u32>, engine: &mut volito::Engine) {
+        self.surface().data().set_physical_size(size, engine);
     }
 
     fn request_throttled_frame_callback<D>(&self, qh: &QueueHandle<D>)

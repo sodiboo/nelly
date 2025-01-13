@@ -1,107 +1,72 @@
-import "dart:async";
+// ignore_for_file: prefer_const_constructors
+
 import "dart:ui";
 
 import "package:flutter/material.dart";
-
-import "tracing.dart";
+import "platform_message/mod.dart" as platform_messages;
+import "platform_message/shutdown.dart";
+import "wl_flutter/wlr_layer.dart";
 import "wl_flutter/xdg_toplevel.dart";
 
-void main(List<String> argv) {
-  runZoned(() {
-    // runWidget(MultiViewApp(
-    //   viewBuilder: (ctx) =>
-    //       ((View.of(ctx) == PlatformDispatcher.instance.implicitView)
-    //           ? const MyApp()
-    //           : const Placeholder()),
-    // ));
-    runWidget(const Nelly());
-  }, zoneSpecification: const ZoneSpecification(print: zonePrintToEmbedder));
+void run() {
+  platform_messages.initListeners();
+  runWidget(const Nelly());
 }
 
-class Nelly extends StatelessWidget {
+class Nelly extends StatefulWidget {
   const Nelly({super.key});
 
   @override
-  Widget build(BuildContext context) {
-    return const ViewCollection(views: [
-      XdgToplevel(title: "nelly", appId: "nelly", child: MyApp()),
-    ]);
-  }
+  State<Nelly> createState() => _NellyState();
 }
 
-/// Calls [viewBuilder] for every view added to the app to obtain the widget to
-/// render into that view. The current view can be looked up with [View.of].
-class MultiViewApp extends StatefulWidget {
-  const MultiViewApp({super.key, required this.viewBuilder});
-
-  final WidgetBuilder viewBuilder;
-
-  @override
-  State<MultiViewApp> createState() => _MultiViewAppState();
-}
-
-class _MultiViewAppState extends State<MultiViewApp>
-    with WidgetsBindingObserver {
-  @override
-  void initState() {
-    super.initState();
-    WidgetsBinding.instance.addObserver(this);
-    _updateViews();
-  }
-
-  @override
-  void didUpdateWidget(MultiViewApp oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    // Need to re-evaluate the viewBuilder callback for all views.
-    _views.clear();
-    _updateViews();
-  }
-
-  @override
-  void didChangeMetrics() {
-    _updateViews();
-  }
-
-  Map<Object, View> _views = {};
-
-  void _updateViews() {
-    final Map<Object, View> newViews = {};
-    for (final FlutterView view
-        in WidgetsBinding.instance.platformDispatcher.views) {
-      final View viewWidget = _views[view.viewId] ?? _createViewWidget(view);
-      newViews[view.viewId] = viewWidget;
-    }
-    setState(() {
-      _views = newViews;
-    });
-  }
-
-  View _createViewWidget(FlutterView view) {
-    return View(
-      view: view,
-      child: Builder(
-        builder: widget.viewBuilder,
-      ),
-    );
-  }
-
-  @override
-  void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
-    super.dispose();
-  }
+class _NellyState extends State<Nelly> {
+  Key xdgKey = UniqueKey();
 
   @override
   Widget build(BuildContext context) {
     return ViewCollection(
-        views: _views.values
-            // .where((v) => v.view != PlatformDispatcher.instance.implicitView)
-            .toList(growable: false));
+      views: [
+        WlrLayerSurface(
+          layer: Layer.top,
+          namespace: "nelly",
+          child: Container(color: Colors.red),
+        ),
+        XdgToplevelSurface(
+          key: xdgKey,
+          title: "nelly",
+          appId: "nelly",
+          onClose: () {
+            gracefulShutdown();
+          },
+          viewConstraints: ViewConstraints(
+            minWidth: 350,
+            minHeight: 200,
+            maxWidth: 900,
+            maxHeight: 800,
+          ),
+          // child: const DemoApp(),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(
+              // minWidth: 350,
+              // minHeight: 200,
+              maxHeight: 800,
+              maxWidth: 900,
+            ),
+            // child: Directionality(
+            //   textDirection: TextDirection.ltr,
+            //   child: const Text("Hello, Nelly!"),
+            // ),
+            child: const DemoApp(),
+          ),
+        ),
+      ],
+    );
   }
 }
 
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+class DemoApp extends StatelessWidget {
+  const DemoApp({super.key});
 
   // This widget is the root of your application.
   @override
@@ -127,8 +92,10 @@ class MyApp extends StatelessWidget {
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.purple),
         useMaterial3: true,
       ),
+      debugShowCheckedModeBanner: false,
       home: MyHomePage(
-          title: "Flutter Demo Home Page (${View.of(context).viewId})"),
+        title: "Flutter Demo Home Page (${View.of(context).viewId})",
+      ),
     );
   }
 }

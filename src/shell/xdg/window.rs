@@ -10,27 +10,16 @@ use smithay_client_toolkit::{
     globals::ProvidesBoundGlobal,
     reexports::{
         client::{
-            backend::ObjectData,
-            protocol::{
-                wl_output::WlOutput,
-                wl_seat::{self, WlSeat},
-                wl_surface::{self, WlSurface},
-            },
+            protocol::{wl_output::WlOutput, wl_seat::WlSeat},
             Connection, Dispatch, Proxy, QueueHandle, WEnum,
         },
         csd_frame::{WindowManagerCapabilities, WindowState},
-        protocols::{
-            wp::{
-                fractional_scale::v1::client::wp_fractional_scale_v1::WpFractionalScaleV1,
-                viewporter::client::wp_viewport::WpViewport,
+        protocols::xdg::{
+            decoration::zv1::client::{
+                zxdg_decoration_manager_v1,
+                zxdg_toplevel_decoration_v1::{self, Mode, ZxdgToplevelDecorationV1},
             },
-            xdg::{
-                decoration::zv1::client::{
-                    zxdg_decoration_manager_v1,
-                    zxdg_toplevel_decoration_v1::{self, Mode, ZxdgToplevelDecorationV1},
-                },
-                shell::client::{xdg_surface, xdg_toplevel},
-            },
+            shell::client::{xdg_surface, xdg_toplevel},
         },
     },
 };
@@ -45,7 +34,12 @@ pub trait WindowHandler: Sized {
     ///
     /// This request does not destroy the window. You must drop all [`Window`] handles to destroy the window.
     /// This request may be sent either by the compositor or by some other mechanism (such as client side decorations).
-    fn request_close(&mut self, conn: &Connection, qh: &QueueHandle<Self>, window: &Window);
+    fn request_close(
+        &mut self,
+        conn: &Connection,
+        qh: &QueueHandle<Self>,
+        window: &XdgToplevelSurface,
+    );
 
     /// Apply a suggested surface change.
     ///
@@ -63,7 +57,7 @@ pub trait WindowHandler: Sized {
         &mut self,
         conn: &Connection,
         qh: &QueueHandle<Self>,
-        window: &Window,
+        window: &XdgToplevelSurface,
         configure: WindowConfigure,
         serial: u32,
     );
@@ -199,28 +193,30 @@ pub enum WindowDecorations {
 }
 
 #[derive(Debug, Clone)]
-pub struct Window(pub(super) Arc<WindowInner>);
+pub struct XdgToplevelSurface(pub(super) Arc<WindowInner>);
 
-impl Window {
-    pub fn from_xdg_toplevel(toplevel: &xdg_toplevel::XdgToplevel) -> Option<Window> {
+impl XdgToplevelSurface {
+    pub fn from_xdg_toplevel(toplevel: &xdg_toplevel::XdgToplevel) -> Option<XdgToplevelSurface> {
         toplevel
             .data::<WindowData>()
             .and_then(|data| data.0.upgrade())
-            .map(Window)
+            .map(XdgToplevelSurface)
     }
 
-    pub fn from_xdg_surface(surface: &xdg_surface::XdgSurface) -> Option<Window> {
+    pub fn from_xdg_surface(surface: &xdg_surface::XdgSurface) -> Option<XdgToplevelSurface> {
         surface
             .data::<WindowData>()
             .and_then(|data| data.0.upgrade())
-            .map(Window)
+            .map(XdgToplevelSurface)
     }
 
-    pub fn from_toplevel_decoration(decoration: &ZxdgToplevelDecorationV1) -> Option<Window> {
+    pub fn from_toplevel_decoration(
+        decoration: &ZxdgToplevelDecorationV1,
+    ) -> Option<XdgToplevelSurface> {
         decoration
             .data::<WindowData>()
             .and_then(|data| data.0.upgrade())
-            .map(Window)
+            .map(XdgToplevelSurface)
     }
 
     pub fn show_window_menu(&self, seat: &WlSeat, serial: u32, position: (i32, i32)) {
@@ -236,9 +232,9 @@ impl Window {
         self.xdg_toplevel().set_app_id(app_id.into());
     }
 
-    pub fn set_parent(&self, parent: Option<&Window>) {
+    pub fn set_parent(&self, parent: Option<&XdgToplevelSurface>) {
         self.xdg_toplevel()
-            .set_parent(parent.map(Window::xdg_toplevel));
+            .set_parent(parent.map(XdgToplevelSurface::xdg_toplevel));
     }
 
     pub fn set_maximized(&self) {
@@ -291,19 +287,15 @@ impl Window {
 
     // Double buffered window state
 
-    pub fn set_min_size(&self, min_size: Option<(u32, u32)>) {
-        let min_size = min_size.unwrap_or_default();
-        self.xdg_toplevel()
-            .set_min_size(min_size.0 as i32, min_size.1 as i32);
+    pub fn set_min_size(&self, width: i32, height: i32) {
+        self.xdg_toplevel().set_min_size(width, height);
     }
 
     /// # Protocol errors
     ///
     /// The maximum size of the window may not be smaller than the minimum size.
-    pub fn set_max_size(&self, max_size: Option<(u32, u32)>) {
-        let max_size = max_size.unwrap_or_default();
-        self.xdg_toplevel()
-            .set_max_size(max_size.0 as i32, max_size.1 as i32);
+    pub fn set_max_size(&self, width: i32, height: i32) {
+        self.xdg_toplevel().set_max_size(width, height);
     }
 
     // Other
@@ -314,19 +306,19 @@ impl Window {
     }
 }
 
-impl WaylandSurface for Window {
+impl WaylandSurface for XdgToplevelSurface {
     fn surface(&self) -> &Surface {
         self.0.xdg_surface.surface()
     }
 }
 
-impl XdgSurface for Window {
+impl XdgSurface for XdgToplevelSurface {
     fn xdg_surface(&self) -> &xdg_surface::XdgSurface {
         self.0.xdg_surface.xdg_surface()
     }
 }
 
-impl PartialEq for Window {
+impl PartialEq for XdgToplevelSurface {
     fn eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
     }
@@ -389,7 +381,7 @@ where
         conn: &Connection,
         qh: &QueueHandle<D>,
     ) {
-        if let Some(window) = Window::from_xdg_surface(xdg_surface) {
+        if let Some(window) = XdgToplevelSurface::from_xdg_surface(xdg_surface) {
             match event {
                 xdg_surface::Event::Configure { serial } => {
                     // Acknowledge the configure per protocol requirements.
@@ -417,7 +409,7 @@ where
         conn: &Connection,
         qh: &QueueHandle<D>,
     ) {
-        if let Some(window) = Window::from_xdg_toplevel(toplevel) {
+        if let Some(window) = XdgToplevelSurface::from_xdg_toplevel(toplevel) {
             match event {
                 xdg_toplevel::Event::Configure {
                     width,
@@ -533,7 +525,7 @@ where
         _: &Connection,
         _: &QueueHandle<D>,
     ) {
-        if let Some(window) = Window::from_toplevel_decoration(decoration) {
+        if let Some(window) = XdgToplevelSurface::from_toplevel_decoration(decoration) {
             match event {
                 zxdg_toplevel_decoration_v1::Event::Configure { mode } => match mode {
                     WEnum::Value(mode) => {
@@ -548,7 +540,7 @@ where
                     }
 
                     WEnum::Unknown(unknown) => {
-                        log::error!(target: "sctk", "unknown decoration mode 0x{:x}", unknown);
+                        tracing::error!(target: "sctk", "unknown decoration mode 0x{:x}", unknown);
                     }
                 },
 

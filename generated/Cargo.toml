@@ -1,0 +1,13 @@
+[package]
+name = "generated"
+edition = "2024"
+version.workspace = true
+
+[lib]
+path = "lib/lib.rs"
+
+[dependencies]
+volito.workspace = true # required for linkage metadata
+
+[build-dependencies]
+volito-build-support.workspace = true

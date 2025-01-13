@@ -1,11 +1,9 @@
+// ignore_for_file: require_trailing_commas
+
 import "dart:async";
 import "dart:convert";
 import "dart:typed_data";
 import "dart:ui";
-
-import "package:flutter/services.dart";
-
-import "../tracing.dart";
 
 class BinaryWriter {
   final BytesBuilder builder;
@@ -47,6 +45,14 @@ class BinaryWriter {
     writeBytes(list.buffer);
   }
 
+  void writeFloat32List(Float32List list) {
+    writeBytes(list.buffer);
+  }
+
+  void writeFloat64List(Float64List list) {
+    writeBytes(list.buffer);
+  }
+
   void writeUint8(int value) {
     writeUint8List(Uint8List.fromList([value]));
   }
@@ -77,6 +83,14 @@ class BinaryWriter {
 
   void writeInt64(int value) {
     writeInt64List(Int64List.fromList([value]));
+  }
+
+  void writeFloat32(double value) {
+    writeFloat32List(Float32List.fromList([value]));
+  }
+
+  void writeFloat64(double value) {
+    writeFloat64List(Float64List.fromList([value]));
   }
 
   void writeUtf8(String str) {
@@ -139,6 +153,18 @@ class BinaryReader {
     return list;
   }
 
+  Float32List readFloat32List(int length) {
+    final list = data.buffer.asFloat32List(cursor, length);
+    cursor += length * list.elementSizeInBytes;
+    return list;
+  }
+
+  Float64List readFloat64List(int length) {
+    final list = data.buffer.asFloat64List(cursor, length);
+    cursor += length * list.elementSizeInBytes;
+    return list;
+  }
+
   int readUint8() {
     return readUint8List(1)[0];
   }
@@ -171,6 +197,14 @@ class BinaryReader {
     return readInt64List(1)[0];
   }
 
+  double readFloat32() {
+    return readFloat32List(1)[0];
+  }
+
+  double readFloat64() {
+    return readFloat64List(1)[0];
+  }
+
   String readUtf8() {
     final length = readUint64();
     final strUtf8 = readUint8List(length);
@@ -185,23 +219,11 @@ class BinaryReader {
   }
 }
 
-Future<ByteData> sendRawPlatformMessage(String channel, ByteData message) {
-  final completer = Completer<ByteData>();
+Future<ByteData?> sendRawPlatformMessage(String channel, ByteData message) {
+  final completer = Completer<ByteData?>();
 
-  info("sending platform message on channel $channel");
-
-  PlatformDispatcher.instance.sendPlatformMessage(
-    channel,
-    message,
-    (ByteData? response) {
-      info("received platform message response on channel $channel");
-      if (response == null) {
-        completer.completeError(Exception("Received null response"));
-      } else {
-        completer.complete(response);
-      }
-    },
-  );
+  PlatformDispatcher.instance
+      .sendPlatformMessage(channel, message, completer.complete);
 
   return completer.future;
 }
@@ -210,18 +232,26 @@ Future<BinaryReader> sendPlatformMessage(
     String channel, FutureOr<void> Function(BinaryWriter) encode) async {
   final writer = BinaryWriter();
   await encode(writer);
-  final message = writer.builder.takeBytes();
+  final message = writer.builder.toBytes();
 
-  info("sending platform message on channel $channel");
   final response =
       await sendRawPlatformMessage(channel, message.buffer.asByteData());
-  info("received platform message response on channel $channel");
 
-  // if (response == null) {
-  //   throw Exception("Received null response");
-  // }
-
-  final reader = BinaryReader(response);
+  final reader = BinaryReader(response ?? ByteData(0));
 
   return reader;
+}
+
+void registerPlatformMessageHandler(
+    String channel,
+    FutureOr<void> Function(BinaryReader message, BinaryWriter response)
+        handle) {
+  channelBuffers.setListener(channel, (data, callback) async {
+    final reader = BinaryReader(data ?? ByteData(0));
+    final writer = BinaryWriter();
+    await handle(reader, writer);
+    final message = writer.builder.toBytes();
+
+    callback(message.buffer.asByteData());
+  });
 }

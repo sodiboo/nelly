@@ -14,21 +14,15 @@ use smithay_client_toolkit::{
             Connection, Dispatch, Proxy, QueueHandle,
         },
         csd_frame::{WindowManagerCapabilities, WindowState},
-        protocols::{
-            wp::{
-                fractional_scale::v1::client::wp_fractional_scale_v1::WpFractionalScaleV1,
-                viewporter::client::wp_viewport::WpViewport,
+        protocols::xdg::{
+            decoration::zv1::client::{
+                zxdg_decoration_manager_v1::ZxdgDecorationManagerV1,
+                zxdg_toplevel_decoration_v1::{Mode, ZxdgToplevelDecorationV1},
             },
-            xdg::{
-                decoration::zv1::client::{
-                    zxdg_decoration_manager_v1::ZxdgDecorationManagerV1,
-                    zxdg_toplevel_decoration_v1::{Mode, ZxdgToplevelDecorationV1},
-                },
-                shell::client::{
-                    xdg_positioner, xdg_surface,
-                    xdg_toplevel::{self, XdgToplevel},
-                    xdg_wm_base::{self, XdgWmBase},
-                },
+            shell::client::{
+                xdg_positioner, xdg_surface,
+                xdg_toplevel::XdgToplevel,
+                xdg_wm_base::{self, XdgWmBase},
             },
         },
     },
@@ -36,8 +30,8 @@ use smithay_client_toolkit::{
 };
 
 use self::window::{
-    DecorationMode, Window, WindowConfigure, WindowData, WindowDecorations, WindowHandler,
-    WindowInner,
+    DecorationMode, WindowConfigure, WindowData, WindowDecorations, WindowHandler, WindowInner,
+    XdgToplevelSurface,
 };
 
 use super::{compositor::Surface, WaylandSurface};
@@ -99,10 +93,10 @@ impl XdgShell {
         surface: impl Into<Surface>,
         decorations: WindowDecorations,
         qh: &QueueHandle<State>,
-    ) -> Window
+    ) -> XdgToplevelSurface
     where
         State: Dispatch<xdg_surface::XdgSurface, WindowData>
-            + Dispatch<xdg_toplevel::XdgToplevel, WindowData>
+            + Dispatch<XdgToplevel, WindowData>
             + Dispatch<ZxdgToplevelDecorationV1, WindowData>
             + WindowHandler
             + 'static,
@@ -177,7 +171,7 @@ impl XdgShell {
         // Explicitly drop the queue freeze to allow the queue to resume work.
         drop(freeze);
 
-        Window(inner)
+        XdgToplevelSurface(inner)
     }
 
     pub fn xdg_wm_base(&self) -> &XdgWmBase {

@@ -4,7 +4,7 @@ use std::{
     time::Duration,
 };
 
-use fluster::{
+use volito::{
     Engine, PointerButtons, PointerDeviceKind, PointerEvent, PointerPhase, PointerSignalKind,
 };
 use smithay_client_toolkit::reexports::client::{
