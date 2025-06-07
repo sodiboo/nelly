@@ -1,5 +1,5 @@
-import "xdg_toplevel.dart" as xdg_toplevel;
+import "package:halcyon/setup.dart" as halcyon;
 
 void initListeners() {
-  xdg_toplevel.initListeners();
+  halcyon.initListeners();
 }

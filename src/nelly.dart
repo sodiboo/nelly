@@ -3,13 +3,14 @@
 import "dart:ui";
 
 import "package:flutter/material.dart";
-import "platform_message/mod.dart" as platform_messages;
+import "package:halcyon/widgets/wlr_layer.dart";
+import "package:halcyon/widgets/xdg_toplevel.dart";
+
+import "platform_message/mod.dart" as platform_message;
 import "platform_message/shutdown.dart";
-import "wl_flutter/wlr_layer.dart";
-import "wl_flutter/xdg_toplevel.dart";
 
 void run() {
-  platform_messages.initListeners();
+  platform_message.initListeners();
   runWidget(const Nelly());
 }
 
@@ -27,11 +28,11 @@ class _NellyState extends State<Nelly> {
   Widget build(BuildContext context) {
     return ViewCollection(
       views: [
-        WlrLayerSurface(
-          layer: Layer.top,
-          namespace: "nelly",
-          child: Container(color: Colors.red),
-        ),
+        // WlrLayerSurface(
+        //   layer: Layer.top,
+        //   namespace: "nelly",
+        //   child: Container(color: Colors.red),
+        // ),
         XdgToplevelSurface(
           key: xdgKey,
           title: "nelly",
@@ -39,20 +40,20 @@ class _NellyState extends State<Nelly> {
           onClose: () {
             gracefulShutdown();
           },
-          viewConstraints: ViewConstraints(
-            minWidth: 350,
-            minHeight: 200,
-            maxWidth: 900,
-            maxHeight: 800,
-          ),
+          // viewConstraints: ViewConstraints(
+          //   minWidth: 350,
+          //   minHeight: 200,
+          //   maxWidth: 900,
+          //   maxHeight: 800,
+          // ),
           // child: const DemoApp(),
           child: ConstrainedBox(
             constraints: const BoxConstraints(
-              // minWidth: 350,
-              // minHeight: 200,
-              maxHeight: 800,
-              maxWidth: 900,
-            ),
+                // minWidth: 350,
+                // minHeight: 200,
+                // maxHeight: 800,
+                // maxWidth: 900,
+                ),
             // child: Directionality(
             //   textDirection: TextDirection.ltr,
             //   child: const Text("Hello, Nelly!"),

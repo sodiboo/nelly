@@ -47,6 +47,7 @@
             nativeBuildInputs = [
               rust-nightly-toolchain
               pkgs.rustPlatform.bindgenHook
+              pkgs.vulkan-loader
               flutter
               (pkgs.writeScriptBin "pub" ''
                 exec "${flutter}/bin/flutter" --local-engine=host_release --local-engine-host=host_release pub "$@"

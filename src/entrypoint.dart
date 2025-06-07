@@ -3,9 +3,10 @@
 
 import "dart:async";
 
-import "package:tracing/zone.dart";
+import "package:halcyon/tracing/setup.dart";
 
-import "lib.dart" show run;
+import "nelly.dart" as nelly;
 
-void main(List<String> args) =>
-    runZoned(run, zoneSpecification: rustTracingZoneSpecification);
+void main(List<String> args) {
+  runZoned(nelly.run, zoneSpecification: tracingZoneSpecification);
+}

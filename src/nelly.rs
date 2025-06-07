@@ -1,54 +1,111 @@
-use std::collections::HashMap;
-use std::path::Path;
-use std::sync::{Arc, Mutex};
+#![feature(ptr_metadata)]
+#![feature(integer_sign_cast)]
+#![warn(clippy::pedantic)]
+#![allow(
+    // unused_imports,
+    dead_code,
+    clippy::too_many_lines,
+    clippy::struct_field_names,
+    clippy::missing_errors_doc,
+    clippy::semicolon_if_nothing_returned, // this one is wrong imo
+)]
+#![deny(clippy::print_stderr, clippy::print_stdout)] // use tracing instead
 
-use volito::{Engine, ViewId};
-use smithay_client_toolkit::output::OutputState;
-use smithay_client_toolkit::reexports::calloop::channel::Sender;
-use smithay_client_toolkit::reexports::calloop::{self, EventLoop, LoopHandle, LoopSignal};
-use smithay_client_toolkit::reexports::calloop_wayland_source::WaylandSource;
-use smithay_client_toolkit::reexports::client::globals::registry_queue_init;
-use smithay_client_toolkit::reexports::client::{Connection, QueueHandle};
-use smithay_client_toolkit::registry::RegistryState;
-use smithay_client_toolkit::shm::Shm;
-use tracing::{debug, error};
+use std::{
+    convert::Infallible,
+    path::Path,
+    sync::{Arc, Mutex},
+};
 
-use crate::config::Config;
-use crate::embedder::{self, FlutterWaylandSurface};
-use crate::shell::compositor::CompositorState;
-use crate::shell::layer::LayerShell;
-use crate::shell::xdg::XdgShell;
+use config::Config;
+use halcyon_embedder::{EmbedderArgs, Halcyon, HalcyonHandler};
+use platform_message::NellyPlatformRequest;
+// use nelly::Nelly;
+use smithay_client_toolkit::{
+    reexports::{
+        calloop::{EventLoop, LoopHandle, LoopSignal},
+        calloop_wayland_source::WaylandSource,
+        client::{globals::registry_queue_init, Connection, QueueHandle},
+    },
+    registry::{ProvidesRegistryState, RegistryState},
+};
+use tracing_subscriber::EnvFilter;
+use volito::graphics::RendererConfig;
 
-use self::seat::SeatState;
+mod engine_meta {
+    include!(concat!(env!("OUT_DIR"), "/engine_meta.rs"));
+}
 
-#[path = "handlers.rs"]
-mod handlers;
-#[path = "seat/mod.rs"]
-mod seat;
+mod config;
+mod platform_message;
 
-#[allow(dead_code)]
-pub struct Nelly {
-    events: Sender<NellyEvent>,
+const DEFAULT_LOG_FILTER: &str = "nelly=trace,halcyon=trace,volito=trace";
+
+// this is the entrypoint.
+// it just gets paths to the compile output of the Dart half of the app.
+// the actual main() is in `/runner/src/main.rs`
+// but distro packagers may wish to write a different runner to compile the Dart half without Cargo.
+pub fn run(assets_path: &Path, app_library: Option<&Path>) -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .compact()
+        .with_env_filter(
+            EnvFilter::builder().parse_lossy(
+                std::env::var("RUST_LOG")
+                    .ok()
+                    .as_deref()
+                    .unwrap_or(DEFAULT_LOG_FILTER),
+            ),
+        )
+        .init();
+
+    let mut event_loop = EventLoop::try_new()?;
+
+    event_loop
+        .run(
+            None,
+            &mut Nelly::new(assets_path, app_library, &Config::load(), &event_loop)?,
+            |nelly| {
+                _ = nelly; // do absolutely nothing
+            },
+        )
+        .map_err(Into::into)
+}
+
+struct Nelly {
     pub qh: QueueHandle<Self>,
     pub loop_handle: LoopHandle<'static, Nelly>,
     pub loop_signal: LoopSignal,
 
-    engine: Engine,
-    pub views: Arc<Mutex<HashMap<ViewId, FlutterWaylandSurface>>>,
-
+    // engine: Engine,
+    // pub views: Arc<Mutex<HashMap<ViewId, FlutterWaylandSurface>>>,
     registry_state: RegistryState,
-    shm: Shm,
-    seat_state: SeatState,
-    output_state: OutputState,
-    pub compositor_state: CompositorState,
-    pub xdg_state: XdgShell,
-    pub layer_shell: LayerShell,
+
+    halcyon: Halcyon<Nelly>,
+    // halcyon: Halcy
+    // shm: Shm,
+    // seat_state: SeatState,
+    // output_state: OutputState,
+    // pub compositor_state: CompositorState,
+    // pub xdg_state: XdgShell,
+    // pub layer_shell: LayerShell,
 }
 
-pub enum NellyEvent {
-    Frame,
-    ViewRemoved(ViewId),
+impl ProvidesRegistryState for Nelly {
+    fn registry(&mut self) -> &mut RegistryState {
+        &mut self.registry_state
+    }
+    smithay_client_toolkit::registry_handlers![Halcyon<Self>];
 }
+smithay_client_toolkit::delegate_registry!(Nelly);
+
+impl HalcyonHandler for Nelly {
+    type PlatformRequest = NellyPlatformRequest;
+
+    fn halcyon(&mut self) -> &mut Halcyon<Self> {
+        &mut self.halcyon
+    }
+}
+halcyon_embedder::delegate_halcyon!(Nelly);
 
 impl Nelly {
     pub fn new(
@@ -60,91 +117,44 @@ impl Nelly {
         let connection = Connection::connect_to_env()?;
 
         let (globals, queue) = registry_queue_init::<Nelly>(&connection).unwrap();
-        debug!("init wayland");
 
         let qh = queue.handle();
 
-        let (events, channel) = calloop::channel::channel();
-
-        event_loop
-            .handle()
-            .insert_source(channel, |event, (), nelly| {
-                let calloop::channel::Event::Msg(event) = event else {
-                    return;
-                };
-                match event {
-                    NellyEvent::Frame => {}
-                    NellyEvent::ViewRemoved(view_id) => {
-                        debug!("View {view_id:?} removed");
-                        nelly.views.lock().unwrap().remove(&view_id);
-                    }
-                };
-            })
-            .map_err(|_| anyhow::anyhow!("Failed to insert message channel"))?;
-
         let registry_state = RegistryState::new(&globals);
-        let shm = Shm::bind(&globals, &qh)?;
-        let seat_state = SeatState::new(&globals, &qh);
-        let output_state = OutputState::new(&globals, &qh);
-        let compositor_state = CompositorState::bind(&globals, &qh)?;
-        let xdg_state = XdgShell::bind(&globals, &qh)?;
-        let layer_shell = LayerShell::bind(&globals, &qh)?;
+        let halcyon = Halcyon::new(
+            EmbedderArgs {
+                assets_path,
+                icu_data_path: Path::new(crate::engine_meta::ICUDTL_DAT),
+                app_library,
+                custom_dart_entrypoint: None,
+                dart_entrypoint_argv: &[],
+                renderer: halcyon_embedder::RendererArgs::Vulkan {
+                    application_name: Some("nelly"),
+                    application_version: 0,
+                },
+            },
+            &globals,
+            event_loop,
+            qh.clone(),
+        )?;
 
         WaylandSource::new(connection, queue).insert(event_loop.handle())?;
 
-        let views = Arc::new(Mutex::new(HashMap::new()));
-
-        let engine = embedder::init(
-            assets_path,
-            app_library,
-            config,
-            event_loop,
-            &shm,
-            &qh,
-            views.clone(),
-        )?;
-
         Ok(Self {
-            events,
             qh,
             loop_handle: event_loop.handle(),
             loop_signal: event_loop.get_signal(),
 
-            engine,
-            views,
-
+            // engine,
+            // views,
             registry_state,
-            shm,
-            seat_state,
-            output_state,
-            compositor_state,
-            xdg_state,
-            layer_shell,
-        })
-    }
-
-    pub fn events(&self) -> &Sender<NellyEvent> {
-        &self.events
-    }
-
-    pub fn send_event(&self, event: NellyEvent) {
-        self.events.send(event).expect("Nelly event channel closed");
-    }
-
-    pub fn engine(&mut self) -> &mut Engine {
-        &mut self.engine
-    }
-
-    pub fn remove_view(&mut self, view_id: ViewId) -> volito::Result<()> {
-        let events = self.events().clone();
-        self.engine().remove_view(view_id, move |success| {
-            if success {
-                events
-                    .send(NellyEvent::ViewRemoved(view_id))
-                    .expect("Nelly event channel closed");
-            } else {
-                error!("Failed to remove view {:?}", view_id);
-            }
+            halcyon,
+            // shm,
+            // seat_state,
+            // output_state,
+            // compositor_state,
+            // xdg_state,
+            // layer_shell,
         })
     }
 }

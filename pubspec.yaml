@@ -35,8 +35,8 @@ dependencies:
     cupertino_icons: ^1.0.8
     ffi: ^2.1.3
     macros: ^0.1.0
-    stack_trace: ^1.11.1
-    tracing: ^1.0.0
+    halcyon:
+        path: ../halcyon
 
 dev_dependencies:
     flutter_test:
@@ -91,5 +91,4 @@ flutter:
     # see https://flutter.dev/to/font-from-package
 
 workspace:
-    - dart_tracing
     - generated

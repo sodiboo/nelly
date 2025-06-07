@@ -1,4 +1,4 @@
-import "binary.dart";
+import "package:halcyon/binary.dart";
 
 Future<void> gracefulShutdown() async {
   final response =

@@ -3,9 +3,12 @@ use std::{
     io::{Read, Result, Seek, Write},
 };
 
-use crate::nelly::Nelly;
+use halcyon_embedder::platform_message::{
+    binary::{BinaryDecodable, BinaryReader, BinaryWriter},
+    ManagedPlatformRequest, PlatformMessageChannel,
+};
 
-use super::binary::{BinaryDecodable, BinaryReader, BinaryWriter};
+use crate::Nelly;
 
 #[derive(Debug)]
 pub struct Shutdown;
@@ -16,9 +19,11 @@ impl BinaryDecodable for Shutdown {
     }
 }
 
-impl super::PlatformRequest for Shutdown {
+impl PlatformMessageChannel for Shutdown {
     const CHANNEL: &'static CStr = c"nelly/graceful_shutdown";
+}
 
+impl ManagedPlatformRequest<Nelly> for Shutdown {
     fn run(self, nelly: &mut Nelly, _writer: &mut BinaryWriter<impl Write>) -> Result<()> {
         nelly.loop_signal.stop();
         Ok(())

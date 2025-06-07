@@ -1,0 +1,8 @@
+rust_root: "."
+rust_input: "crate::ffi::api"
+rust_output: "src/gen/frb_generated.rs"
+dart_root: "."
+dart_output: "src/gen"
+flutter_engine:
+    src_path: "<!>"
+    build: "host_release"
